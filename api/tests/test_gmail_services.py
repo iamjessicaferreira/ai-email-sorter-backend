@@ -135,3 +135,61 @@ def test_account_not_created_if_refresh_token_missing(monkeypatch):
     update_gmail_account_from_social(user)
 
     assert not GmailAccount.objects.filter(user=user, email=email).exists()
+
+@pytest.mark.django_db
+def test_multiple_gmail_accounts(monkeypatch):
+    user = User.objects.create_user(username="multigmailuser", password="123")
+
+    # Contas conectadas
+    emails = ["acc1@gmail.com", "acc2@gmail.com", "acc3@gmail.com"]
+    tokens = ["token1", "token2", "token3"]
+    refresh_tokens = ["refresh1", "refresh2", "refresh3"]
+
+    # Cria três entradas de UserSocialAuth para o mesmo user
+    for i in range(3):
+        UserSocialAuth.objects.create(
+            user=user,
+            provider="google-oauth2",
+            uid=f"uid-{i}",
+            extra_data={
+                "access_token": tokens[i],
+                "refresh_token": refresh_tokens[i],
+                "expires": int((datetime.now() + timedelta(hours=1)).timestamp())
+            }
+        )
+
+    # Mock da API para retornar perfis diferentes baseado no access_token
+    def mock_build(*args, **kwargs):
+        class MockProfile:
+            def __init__(self, email):
+                self.email = email
+            def execute(self):
+                return {"emailAddress": self.email}
+
+        class MockUser:
+            def __init__(self, email):
+                self.email = email
+            def getProfile(self, userId):
+                return MockProfile(self.email)
+
+        class MockService:
+            def __init__(self, email):
+                self.email = email
+            def users(self):
+                return MockUser(self.email)
+
+        # Pega o token atual do kwargs
+        token = kwargs["credentials"].token
+        index = tokens.index(token)
+        email = emails[index]
+        return MockService(email)
+
+    monkeypatch.setattr("api.gmail_services.build", mock_build)
+
+    update_gmail_account_from_social(user)
+
+    # Verifica se as 3 contas foram criadas
+    for i in range(3):
+        account = GmailAccount.objects.get(user=user, email=emails[i])
+        assert account.refresh_token == refresh_tokens[i]
+        assert account.access_token == tokens[i]

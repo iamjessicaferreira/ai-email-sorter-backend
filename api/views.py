@@ -49,10 +49,11 @@ def disconnect_google_account(request):
     try:
         account = UserSocialAuth.objects.get(user=request.user, provider='google-oauth2', uid=uid)
         account.delete()
+        # Deletar ou desativar o GmailAccount correspondente
+        GmailAccount.objects.filter(user=request.user, uid=uid).delete()
         return Response({'message': 'Conta Google desconectada com sucesso'})
     except UserSocialAuth.DoesNotExist:
         return Response({'error': 'Conta não encontrada'}, status=404)
-
 
 class EmailCategoryViewSet(viewsets.ModelViewSet):
     serializer_class = EmailCategorySerializer
@@ -69,9 +70,17 @@ class EmailCategoryViewSet(viewsets.ModelViewSet):
 @permission_classes([IsAuthenticated])
 def fetch_emails(request):
     user = request.user
-    gmail_accounts = GmailAccount.objects.filter(user=user)
-    response_data = []
+    print(f"User logado: {user.id} - {user.email}")
 
+    active_social_accounts = UserSocialAuth.objects.filter(user=user, provider='google-oauth2')
+    print('active accounts:', active_social_accounts)
+    active_emails = [account.extra_data.get('email') for account in active_social_accounts]
+    print('active_emails:', active_emails)
+
+    gmail_accounts = GmailAccount.objects.filter(user=user, email__in=active_emails)
+    print('accounts gmail:', GmailAccount.objects.all())
+    response_data = []
+    # print('accounts:', gmail_accounts)
     for account in gmail_accounts:
         try:
             creds = Credentials(
@@ -96,6 +105,7 @@ def fetch_emails(request):
             ).execute()
 
             messages = results.get('messages', [])
+            print(f"{account.email} => mensagens encontradas: {len(messages)}")
             emails_list = []
 
             for msg in messages:

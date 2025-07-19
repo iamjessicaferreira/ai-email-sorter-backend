@@ -12,9 +12,17 @@ def update_gmail_account_from_social(user):
         access_token = social.extra_data.get('access_token')
         refresh_token = social.extra_data.get('refresh_token')
         expires_at_timestamp = social.extra_data.get('expires')
+        uid = social.uid  # pega o uid do social auth
 
         if not access_token:
-            continue  # não tem nem access_token? ignora
+            continue  # ignora se não tiver token
+
+        expires_at = None
+        if expires_at_timestamp:
+            try:
+                expires_at = datetime.fromtimestamp(expires_at_timestamp, tz=timezone.utc)
+            except Exception as e:
+                print(f"[WARN] Erro convertendo expires_at: {e}")
 
         credentials = Credentials(
             token=access_token,
@@ -33,20 +41,15 @@ def update_gmail_account_from_social(user):
             print(f"[OAuth ERROR] Erro ao obter perfil do Gmail: {e}")
             continue
 
-        # Tenta recuperar uma conta existente
-        existing_account = GmailAccount.objects.filter(user=user, email=email_address).first()
+        existing_account = GmailAccount.objects.filter(uid=uid).first()
 
         if existing_account:
-            # Atualiza o access_token e expires_at SEM perder o refresh_token, se ele não vier
             existing_account.access_token = access_token
-            existing_account.expires_at = datetime.fromtimestamp(expires_at_timestamp, tz=timezone.utc)
-
-            if refresh_token:  # só sobrescreve se for válido
+            existing_account.expires_at = expires_at
+            if refresh_token:
                 existing_account.refresh_token = refresh_token
-
             existing_account.save()
         else:
-            # Cria uma nova conta com todos os campos
             if not refresh_token:
                 print(f"[AVISO] Nova conta {email_address} conectada sem refresh_token. Pulei.")
                 continue
@@ -54,7 +57,8 @@ def update_gmail_account_from_social(user):
             GmailAccount.objects.create(
                 user=user,
                 email=email_address,
+                uid=uid,
                 access_token=access_token,
                 refresh_token=refresh_token,
-                expires_at=datetime.fromtimestamp(expires_at_timestamp, tz=timezone.utc)
+                expires_at=expires_at
             )
