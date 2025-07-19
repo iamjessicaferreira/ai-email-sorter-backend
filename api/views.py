@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 
 import base64
 import html
+import os
 
 
 @api_view(['GET'])
@@ -87,8 +88,8 @@ def fetch_emails(request):
                 token=account.access_token,
                 refresh_token=account.refresh_token,
                 token_uri="https://oauth2.googleapis.com/token",
-                client_id="REMOVED_CLIENT_ID",
-                client_secret="REMOVED_SECRET",
+                client_id=os.getenv("SOCIAL_AUTH_GOOGLE_OAUTH2_KEY"),
+                client_secret=os.getenv("SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET"),
                 scopes=["https://www.googleapis.com/auth/gmail.readonly"],
             )
 
