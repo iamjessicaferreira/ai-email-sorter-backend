@@ -2,9 +2,11 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from social_django.models import UserSocialAuth
+from django.shortcuts import redirect
 from rest_framework import viewsets, permissions
 from .models import EmailCategory, GmailAccount
 from .serializers import EmailCategorySerializer
+from .gmail_services import update_gmail_account_from_social
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -14,14 +16,9 @@ from googleapiclient.discovery import build
 @permission_classes([IsAuthenticated])
 def auth_success(request):
     user = request.user
-    return Response({
-        'message': 'Login successful',
-        'user': {
-            'id': user.id,
-            'username': user.username,
-            'email': user.email,
-        }
-    })
+    update_gmail_account_from_social(user)
+    print("SUCESSO: Login com", user.email)
+    return redirect('http://localhost:3000/auth/success/')
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -30,8 +27,6 @@ def list_google_accounts(request):
     data = []
     
     for account in accounts:
-
-        print("Extra data:", account.extra_data) 
         data.append({
             'uid': account.uid,
             'email': account.extra_data.get('email'),
@@ -113,3 +108,15 @@ def fetch_emails(request):
             print(f"Erro ao buscar emails da conta {account.email}: {e}")
 
     return Response({"message": "Fetched emails successfully", "emails_count": len(all_emails)})
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def has_refresh_token(request):
+    user = request.user
+    try:
+        gmail_account = GmailAccount.objects.get(user=user)
+        has_token = bool(gmail_account.refresh_token)
+    except GmailAccount.DoesNotExist:
+        has_token = False
+
+    return Response({'has_refresh_token': has_token})

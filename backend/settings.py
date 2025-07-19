@@ -11,6 +11,11 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
+import os
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(dotenv_path=BASE_DIR / '.env')
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -136,9 +141,8 @@ STATIC_URL = 'static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-SOCIAL_AUTH_GOOGLE_OAUTH2_KEY = 'REMOVED_CLIENT_ID'
-SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET = 'REMOVED_SECRET'
-
+SOCIAL_AUTH_GOOGLE_OAUTH2_KEY = os.getenv("SOCIAL_AUTH_GOOGLE_OAUTH2_KEY")
+SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET = os.getenv("SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET")
 # settings.py
 SOCIAL_AUTH_ALLOW_MULTIPLE_USERS = True
 
@@ -156,7 +160,7 @@ SOCIAL_AUTH_GOOGLE_OAUTH2_SCOPE = [
 
 SOCIAL_AUTH_GOOGLE_OAUTH2_EXTRA_DATA = ['refresh_token', 'access_token', 'expires']
 
-LOGIN_REDIRECT_URL = 'http://localhost:3000/auth/success/'  # endpoint para redirecionar após login
+LOGIN_REDIRECT_URL = '/api/auth/success/' # endpoint para redirecionar após login
 LOGOUT_REDIRECT_URL = '/'
 
 SOCIAL_AUTH_GOOGLE_OAUTH2_IGNORE_DEFAULT_SCOPE = True
@@ -179,7 +183,3 @@ SOCIAL_AUTH_PIPELINE = (
     'api.pipeline.save_email_to_extra_data', 
     'social_core.pipeline.user.user_details',
 )
-
-import pprint
-print("SOCIAL_AUTH_PIPELINE está configurada como:")
-pprint.pprint(SOCIAL_AUTH_PIPELINE)

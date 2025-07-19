@@ -13,7 +13,7 @@ def update_gmail_account_from_social(user):
     extra_data = social.extra_data
     email = extra_data.get('email') or user.email
     access_token = extra_data.get('access_token')
-    refresh_token = extra_data.get('refresh_token') or social.tokens.get('refresh_token')  # ajuste se precisar
+    refresh_token = extra_data.get('refresh_token')  # só daqui mesmo
     expires = extra_data.get('expires')
 
     if expires:
@@ -21,16 +21,13 @@ def update_gmail_account_from_social(user):
     else:
         expires_at = None
 
-    if not refresh_token:
-        refresh_token = social.extra_data.get('refresh_token')
+    gmail_account, created = GmailAccount.objects.get_or_create(user=user, email=email)
 
-    gmail_account, created = GmailAccount.objects.update_or_create(
-        user=user,
-        email=email,
-        defaults={
-            'access_token': access_token,
-            'refresh_token': refresh_token,
-            'expires_at': expires_at,
-        }
-    )
+    if refresh_token:
+        gmail_account.refresh_token = refresh_token
+
+    gmail_account.access_token = access_token
+    gmail_account.expires_at = expires_at
+    gmail_account.save()
+
     return gmail_account
