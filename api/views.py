@@ -8,8 +8,13 @@ from .models import EmailCategory, GmailAccount
 from .serializers import EmailCategorySerializer
 from .gmail_services import update_gmail_account_from_social
 
+from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from datetime import datetime, timezone
+
+import base64
+import html
 
 
 @api_view(['GET'])
@@ -64,15 +69,11 @@ class EmailCategoryViewSet(viewsets.ModelViewSet):
 @permission_classes([IsAuthenticated])
 def fetch_emails(request):
     user = request.user
-    print("user", user)
-
     gmail_accounts = GmailAccount.objects.filter(user=user)
-    all_emails = []
-    print("accounts", gmail_accounts)
+    response_data = []
 
     for account in gmail_accounts:
         try:
-           
             creds = Credentials(
                 token=account.access_token,
                 refresh_token=account.refresh_token,
@@ -81,11 +82,9 @@ def fetch_emails(request):
                 client_secret="REMOVED_SECRET",
                 scopes=["https://www.googleapis.com/auth/gmail.readonly"],
             )
-            print("creds", creds)
 
-        
             if account.expires_at and account.expires_at < datetime.now(timezone.utc):
-                creds.refresh(Request()) 
+                creds.refresh(Request())
                 account.access_token = creds.token
                 account.expires_at = datetime.fromtimestamp(creds.expiry.timestamp(), timezone.utc)
                 account.save()
@@ -96,18 +95,42 @@ def fetch_emails(request):
                 userId='me', labelIds=['INBOX'], q="is:unread"
             ).execute()
 
-            print("Lista de mensagens retornadas:", results)
-
             messages = results.get('messages', [])
+            emails_list = []
 
             for msg in messages:
-                message = service.users().messages().get(userId='me', id=msg['id'], format='full').execute()
-                all_emails.append(message)
+                try:
+                    message = service.users().messages().get(
+                        userId='me',
+                        id=msg['id'],
+                        format='full'
+                    ).execute()
+
+                    headers = message.get('payload', {}).get('headers', [])
+                    subject = next((h['value'] for h in headers if h['name'] == 'Subject'), '(Sem assunto)')
+                    snippet = message.get('snippet', '')
+
+                    emails_list.append({
+                        'id': msg['id'],
+                        'subject': subject,
+                        'body': snippet,
+                    })
+
+                except Exception as inner_e:
+                    print(f"Erro ao buscar mensagem ID {msg['id']}: {inner_e}")
+
+            response_data.append({
+                'email': account.email,
+                'messages': emails_list,
+            })
 
         except Exception as e:
             print(f"Erro ao buscar emails da conta {account.email}: {e}")
 
-    return Response({"message": "Fetched emails successfully", "emails_count": len(all_emails)})
+    return Response({
+        "message": "Fetched emails successfully",
+        "accounts": response_data
+    })
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
