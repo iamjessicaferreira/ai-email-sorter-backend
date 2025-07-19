@@ -4,9 +4,9 @@ from rest_framework.response import Response
 from social_django.models import UserSocialAuth
 from django.shortcuts import redirect
 from rest_framework import viewsets, permissions
-from .models import EmailCategory, GmailAccount
+from .models import EmailCategory, GmailAccount, Email
 from .serializers import EmailCategorySerializer
-from .gmail_services import update_gmail_account_from_social
+from .gmail_services import update_gmail_account_from_social, fetch_and_store_emails
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -71,77 +71,70 @@ class EmailCategoryViewSet(viewsets.ModelViewSet):
 @permission_classes([IsAuthenticated])
 def fetch_emails(request):
     user = request.user
-    print(f"User logado: {user.id} - {user.email}")
+    print(f"[FETCH] User logado: {user.id} - {user.email}")
 
-    active_social_accounts = UserSocialAuth.objects.filter(user=user, provider='google-oauth2')
-    print('active accounts:', active_social_accounts)
-    active_emails = [account.extra_data.get('email') for account in active_social_accounts]
-    print('active_emails:', active_emails)
+    # 1. Lê o parâmetro ?limit= (padrão: 15)
+    try:
+        ai_limit = int(request.query_params.get('limit', 15))
+    except ValueError:
+        return Response({"error": "Parâmetro 'limit' inválido"}, status=400)
 
-    gmail_accounts = GmailAccount.objects.filter(user=user, email__in=active_emails)
-    print('accounts gmail:', GmailAccount.objects.all())
+    print(f"[FETCH] AI processing limit: {ai_limit}")
+
+    # 2. Busca novos e-mails e salva no banco
+    fetch_and_store_emails(user, ai_limit=ai_limit)
+
+    # 3. Monta resposta agrupando por conta e categoria
+    gmail_accounts = GmailAccount.objects.filter(user=user)
     response_data = []
-    # print('accounts:', gmail_accounts)
+
     for account in gmail_accounts:
-        try:
-            creds = Credentials(
-                token=account.access_token,
-                refresh_token=account.refresh_token,
-                token_uri="https://oauth2.googleapis.com/token",
-                client_id=os.getenv("SOCIAL_AUTH_GOOGLE_OAUTH2_KEY"),
-                client_secret=os.getenv("SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET"),
-                scopes=["https://www.googleapis.com/auth/gmail.readonly"],
-            )
+        categories = list(EmailCategory.objects.filter(user=user).values('name', 'description'))
+        emails = Email.objects.filter(gmail_account=account).order_by('-received_at')
 
-            if account.expires_at and account.expires_at < datetime.now(timezone.utc):
-                creds.refresh(Request())
-                account.access_token = creds.token
-                account.expires_at = datetime.fromtimestamp(creds.expiry.timestamp(), timezone.utc)
-                account.save()
+        emails_by_category = {cat['name']: [] for cat in categories}
+        emails_by_category['Sem categoria'] = []
 
-            service = build('gmail', 'v1', credentials=creds)
+        for email in emails:
+            email_data = {
+                'id': email.message_id,
+                'subject': email.subject,
+                'body': email.body,
+                'summary': email.summary,
+                'received_at': email.received_at.isoformat(),
+                'wasReviewedByAI': email.wasReviewedByAI,  # <- agora incluímos isso também
+            }
 
-            results = service.users().messages().list(
-                userId='me', labelIds=['INBOX'], q="is:unread"
-            ).execute()
+            if email.category:
+                emails_by_category[email.category.name].append(email_data)
+            else:
+                emails_by_category['Sem categoria'].append(email_data)
 
-            messages = results.get('messages', [])
-            print(f"{account.email} => mensagens encontradas: {len(messages)}")
-            emails_list = []
-
-            for msg in messages:
-                try:
-                    message = service.users().messages().get(
-                        userId='me',
-                        id=msg['id'],
-                        format='full'
-                    ).execute()
-
-                    headers = message.get('payload', {}).get('headers', [])
-                    subject = next((h['value'] for h in headers if h['name'] == 'Subject'), '(Sem assunto)')
-                    snippet = message.get('snippet', '')
-
-                    emails_list.append({
-                        'id': msg['id'],
-                        'subject': subject,
-                        'body': snippet,
-                    })
-
-                except Exception as inner_e:
-                    print(f"Erro ao buscar mensagem ID {msg['id']}: {inner_e}")
-
-            response_data.append({
-                'email': account.email,
-                'messages': emails_list,
+        categories_data = []
+        for cat in categories:
+            categories_data.append({
+                'name': cat['name'],
+                'description': cat['description'],
+                'emails': emails_by_category.get(cat['name'], [])
             })
 
-        except Exception as e:
-            print(f"Erro ao buscar emails da conta {account.email}: {e}")
+        if emails_by_category['Sem categoria']:
+            categories_data.append({
+                'name': 'Sem categoria',
+                'description': 'Emails sem categoria atribuída',
+                'emails': emails_by_category['Sem categoria']
+            })
+
+        response_data.append({
+            'email': account.email,
+            'categories': categories_data
+        })
 
     return Response({
-        "message": "Fetched emails successfully",
+        "message": "Fetched and stored emails successfully",
         "accounts": response_data
     })
+
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -154,3 +147,26 @@ def has_refresh_token(request):
         has_token = False
 
     return Response({'has_refresh_token': has_token})
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def archive_email(request):
+    user = request.user
+    message_id = request.data.get("message_id")
+
+    if not message_id:
+        return Response({"error": "message_id é obrigatório"}, status=400)
+
+    email_obj = Email.objects.filter(message_id=message_id, gmail_account__user=user).first()
+    if not email_obj:
+        return Response({"error": "Email não encontrado"}, status=404)
+
+    service = get_gmail_service(email_obj.gmail_account)
+    success = archive_email_on_gmail(service, message_id)
+
+    if success:
+        email_obj.is_archived = True
+        email_obj.save()
+        return Response({"message": "Email arquivado com sucesso"})
+    else:
+        return Response({"error": "Erro ao arquivar email"}, status=500)

@@ -189,3 +189,6 @@ SOCIAL_AUTH_PIPELINE = (
     'api.pipeline.save_email_to_extra_data', 
     'social_core.pipeline.user.user_details',
 )
+
+
+HF_API_TOKEN = os.getenv("HF_API_TOKEN")
