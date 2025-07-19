@@ -10,3 +10,11 @@ class GmailAccount(models.Model):
 
     def __str__(self):
         return self.email
+
+class EmailCategory(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='categories')
+    name = models.CharField(max_length=100)
+    description = models.TextField()
+
+    def __str__(self):
+        return f"{self.name} ({self.user.username})"
