@@ -6,7 +6,7 @@ from django.shortcuts import redirect
 from rest_framework import viewsets, permissions
 from .models import EmailCategory, GmailAccount, Email
 from .serializers import EmailCategorySerializer
-from .gmail_services import update_gmail_account_from_social, fetch_and_store_emails
+from .gmail_services import archive_email_on_gmail, get_gmail_service, update_gmail_account_from_social, fetch_and_store_emails
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -66,76 +66,67 @@ class EmailCategoryViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
-
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def fetch_emails(request):
+    """
+    Busca os 10 últimos e-mails não lidos eprocessa IA apenas se flag=False.
+    Retorna sempre esses 10 e-mails com category/summary de cache ou IA.
+    """
     user = request.user
-    print(f"[FETCH] User logado: {user.id} - {user.email}")
 
-    # 1. Lê o parâmetro ?limit= (padrão: 15)
-    try:
-        ai_limit = int(request.query_params.get('limit', 15))
-    except ValueError:
-        return Response({"error": "Parâmetro 'limit' inválido"}, status=400)
+    # chama sem parâmetro de limite: sempre 10
+    emails = fetch_and_store_emails(user)
 
-    print(f"[FETCH] AI processing limit: {ai_limit}")
+    # agrupa por conta e categoria
+    response = []
+    for account in GmailAccount.objects.filter(user=user):
+        cats = []
+        user_cats = EmailCategory.objects.filter(user=user)
+        buckets = {c.name: [] for c in user_cats}
 
-    # 2. Busca novos e-mails e salva no banco
-    fetch_and_store_emails(user, ai_limit=ai_limit)
-
-    # 3. Monta resposta agrupando por conta e categoria
-    gmail_accounts = GmailAccount.objects.filter(user=user)
-    response_data = []
-
-    for account in gmail_accounts:
-        categories = list(EmailCategory.objects.filter(user=user).values('name', 'description'))
-        emails = Email.objects.filter(gmail_account=account).order_by('-received_at')
-
-        emails_by_category = {cat['name']: [] for cat in categories}
-        emails_by_category['Sem categoria'] = []
-
-        for email in emails:
-            email_data = {
-                'id': email.message_id,
-                'subject': email.subject,
-                'body': email.body,
-                'summary': email.summary,
-                'received_at': email.received_at.isoformat(),
-                'wasReviewedByAI': email.wasReviewedByAI,  # <- agora incluímos isso também
+        for e in emails:
+            if e.gmail_account_id != account.id:
+                continue
+            entry = {
+                'id': e.message_id,
+                'subject': e.subject,
+                'body': e.body,
+                'summary': e.summary,
+                'received_at': e.received_at.isoformat(),
+                'wasReviewedByAI': e.wasReviewedByAI,
             }
-
-            if email.category:
-                emails_by_category[email.category.name].append(email_data)
+            if e.category:
+                buckets[e.category.name].append(entry)
             else:
-                emails_by_category['Sem categoria'].append(email_data)
+                # caso não exista categoria, pode ir pra um grupo “Sem categoria”
+                buckets.setdefault('Sem categoria', []).append(entry)
 
-        categories_data = []
-        for cat in categories:
-            categories_data.append({
-                'name': cat['name'],
-                'description': cat['description'],
-                'emails': emails_by_category.get(cat['name'], [])
+        # montar array de categorias
+        for c in user_cats:
+            cats.append({
+                'name': c.name,
+                'description': c.description,
+                'emails': buckets[c.name]
             })
-
-        if emails_by_category['Sem categoria']:
-            categories_data.append({
+        # opcional “Sem categoria” no fim
+        if buckets.get('Sem categoria'):
+            cats.append({
                 'name': 'Sem categoria',
-                'description': 'Emails sem categoria atribuída',
-                'emails': emails_by_category['Sem categoria']
+                'description': 'E-mails sem categoria',
+                'emails': buckets['Sem categoria']
             })
 
-        response_data.append({
+        response.append({
             'email': account.email,
-            'categories': categories_data
+            'categories': cats,
+            'raw_emails': buckets.get('Sem categoria', [])
         })
 
     return Response({
-        "message": "Fetched and stored emails successfully",
-        "accounts": response_data
+        'message': 'Fetched last 10 unread emails',
+        'accounts': response
     })
-
-
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def has_refresh_token(request):
