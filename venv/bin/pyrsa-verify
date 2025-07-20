@@ -1,4 +1,4 @@
-#!/home/jnf/Documentos/jumpapp/ai-email-sorter-backend/venv/bin/python3
+#!/Users/jessicaferreira/Documents/Development/jumapp/ai-email-sorter-backend/venv/bin/python3.13
 # -*- coding: utf-8 -*-
 import re
 import sys

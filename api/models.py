@@ -3,11 +3,14 @@ from django.contrib.auth.models import User
 
 class GmailAccount(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='gmail_accounts')
+    backlog_cleared = models.BooleanField(default=False)
     email = models.EmailField()
     uid = models.CharField(max_length=255, unique=True)
     refresh_token = models.CharField(max_length=255)
     access_token = models.CharField(max_length=255)
     expires_at = models.DateTimeField(null=True, blank=True)
+    last_history_id  = models.CharField(max_length=64, blank=True, null=True)
+    watch_expires_at = models.DateTimeField(blank=True, null=True)
 
     def __str__(self):
         return self.email

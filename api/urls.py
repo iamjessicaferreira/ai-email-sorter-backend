@@ -1,19 +1,44 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    auth_success, list_google_accounts, disconnect_google_account, fetch_emails, has_refresh_token, archive_email,
-    EmailCategoryViewSet 
+    auth_complete_redirect,
+    auth_accounts_list,
+    email_detail,
+    has_refresh_token,
+    list_google_accounts,
+    disconnect_google_account,
+    archive_email,
+    delete_emails,
+    EmailCategoryViewSet,
+    unsubscribe_emails,
 )
 
 router = DefaultRouter()
 router.register(r'categories', EmailCategoryViewSet, basename='emailcategory')
 
 urlpatterns = [
-    path('auth/success/', auth_success),
-    path('auth/refresh-token/', has_refresh_token),
-    path('auth/google-accounts/', list_google_accounts),
-    path('auth/disconnect-google/', disconnect_google_account),
-    path('fetch-emails/', fetch_emails),
-    path('archive-emails/', archive_email),
-    path('', include(router.urls)),
+    # 1) social-auth (“login/google‑oauth2/” e “complete/google‑oauth2/”)
+    path("auth/", include("social_django.urls", namespace="social")),
+
+    path(
+        "auth/complete/google-oauth2/",
+        auth_complete_redirect,
+        name="auth-complete-redirect",
+    ),
+
+    # 2) suporte ao front
+    path("auth/refresh-token/", has_refresh_token),
+    path("auth/success/", auth_accounts_list, name="auth-accounts-list"),
+    path("auth/google-accounts/", list_google_accounts),
+    path("auth/disconnect-google/", disconnect_google_account),
+
+    # 3) bulk / archive / delete
+    path("archive-emails/", archive_email),
+    path("delete-emails/", delete_emails),
+    path('unsubscribe-emails/', unsubscribe_emails),
+    path('emails/<str:message_id>/', email_detail),
+
+
+    # 4) categories via ViewSet em /api/categories/
+    path("", include(router.urls)),
 ]

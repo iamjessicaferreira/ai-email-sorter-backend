@@ -1,3 +1,5 @@
+import asyncio
+import re
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -5,13 +7,17 @@ from social_django.models import UserSocialAuth
 from django.shortcuts import redirect
 from rest_framework import viewsets, permissions
 from .models import EmailCategory, GmailAccount, Email
-from .serializers import EmailCategorySerializer
-from .gmail_services import archive_email_on_gmail, get_gmail_service, update_gmail_account_from_social, fetch_and_store_emails
+from .serializers import EmailCategorySerializer, EmailSerializer
+from .gmail_services import _automate_unsubscribe, archive_email_on_gmail, get_gmail_service, update_gmail_account_from_social, fetch_and_store_emails
+from rest_framework import status
 
+
+from django.views.decorators.csrf import csrf_exempt
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from datetime import datetime, timezone
+from googleapiclient.errors import HttpError
 
 import base64
 import html
@@ -20,11 +26,25 @@ import os
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-def auth_success(request):
-    user = request.user
-    update_gmail_account_from_social(user)
-    print("SUCESSO: Login com", user.email)
-    return redirect('http://localhost:3000/auth/success/')
+def auth_complete_redirect(request):
+    """
+    Callback do social-auth: atualiza/cria GmailAccount
+    e depois redireciona o navegador para a Dashboard no front.
+    """
+    update_gmail_account_from_social(request.user)
+    # URL da sua aplicação React
+    return redirect("http://localhost:3000/")
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def auth_accounts_list(request):
+    """
+    Retorna JSON com todas as GmailAccount do user.
+    """
+    update_gmail_account_from_social(request.user)
+    qs = GmailAccount.objects.filter(user=request.user)
+    data = [{"uid": a.uid, "email": a.email} for a in qs]
+    return Response(data)
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -66,67 +86,6 @@ class EmailCategoryViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def fetch_emails(request):
-    """
-    Busca os 10 últimos e-mails não lidos eprocessa IA apenas se flag=False.
-    Retorna sempre esses 10 e-mails com category/summary de cache ou IA.
-    """
-    user = request.user
-
-    # chama sem parâmetro de limite: sempre 10
-    emails = fetch_and_store_emails(user)
-
-    # agrupa por conta e categoria
-    response = []
-    for account in GmailAccount.objects.filter(user=user):
-        cats = []
-        user_cats = EmailCategory.objects.filter(user=user)
-        buckets = {c.name: [] for c in user_cats}
-
-        for e in emails:
-            if e.gmail_account_id != account.id:
-                continue
-            entry = {
-                'id': e.message_id,
-                'subject': e.subject,
-                'body': e.body,
-                'summary': e.summary,
-                'received_at': e.received_at.isoformat(),
-                'wasReviewedByAI': e.wasReviewedByAI,
-            }
-            if e.category:
-                buckets[e.category.name].append(entry)
-            else:
-                # caso não exista categoria, pode ir pra um grupo “Sem categoria”
-                buckets.setdefault('Sem categoria', []).append(entry)
-
-        # montar array de categorias
-        for c in user_cats:
-            cats.append({
-                'name': c.name,
-                'description': c.description,
-                'emails': buckets[c.name]
-            })
-        # opcional “Sem categoria” no fim
-        if buckets.get('Sem categoria'):
-            cats.append({
-                'name': 'Sem categoria',
-                'description': 'E-mails sem categoria',
-                'emails': buckets['Sem categoria']
-            })
-
-        response.append({
-            'email': account.email,
-            'categories': cats,
-            'raw_emails': buckets.get('Sem categoria', [])
-        })
-
-    return Response({
-        'message': 'Fetched last 10 unread emails',
-        'accounts': response
-    })
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def has_refresh_token(request):
@@ -161,3 +120,100 @@ def archive_email(request):
         return Response({"message": "Email arquivado com sucesso"})
     else:
         return Response({"error": "Erro ao arquivar email"}, status=500)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def delete_emails(request):
+    """
+    Recebe {"email_ids": ["<msgId>", ...]} e deleta cada um no Gmail e no nosso DB.
+    """
+    user = request.user
+    email_ids = request.data.get('email_ids', [])
+    failures = []
+    successes = []
+
+    for msg_id in email_ids:
+        # garante que pertence ao usuário logado
+        email_obj = Email.objects.filter(
+            gmail_account__user=user,
+            message_id=msg_id
+        ).first()
+
+        if not email_obj:
+            failures.append({'id': msg_id, 'error': 'não encontrado'})
+            continue
+
+        service = get_gmail_service(email_obj.gmail_account)
+        try:
+            service.users().messages().trash(userId='me', id=msg_id).execute()
+            email_obj.delete()
+            successes.append(msg_id)  # <-- aqui!
+        except HttpError as e:
+            failures.append({'id': msg_id, 'error': f'Gmail API: {e.resp.status}'})
+        except Exception as e:
+            failures.append({'id': msg_id, 'error': str(e)})
+
+    if failures:
+        return Response({
+            "message": "Algumas deleções falharam",
+            "successes": successes,
+            "failures": failures
+        }, status=207)
+
+    return Response({"successes": successes, "failures": []}, status=200)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def unsubscribe_emails(request):
+    """
+    Tenta dar unsubscribe em cada email; só conta como sucesso se
+    encontrou o link e completou a ação.
+    """
+    user = request.user
+    email_ids = request.data.get('email_ids', [])
+    success_ids = []
+    failures = []
+
+    for msg_id in email_ids:
+        email_obj = Email.objects.filter(
+            gmail_account__user=user, message_id=msg_id
+        ).first()
+        if not email_obj:
+            failures.append({'id': msg_id, 'error': 'não encontrado no DB'})
+            continue
+
+        # aqui você passa o body ou URL pra sua rotina de Playwright
+        try:
+            unsub_ok = _automate_unsubscribe(email_obj.body)
+        except Exception as e:
+            failures.append({'id': msg_id, 'error': str(e)})
+            continue
+
+        if unsub_ok:
+            success_ids.append(msg_id)
+            # flag opcional no DB
+            email_obj.is_unsubscribed = True
+            email_obj.save()
+        else:
+            failures.append({'id': msg_id,
+                             'error': 'Nenhum link de unsubscribe encontrado'})
+    status = 207 if failures else 200
+    return Response({'success_ids': success_ids, 'failures': failures}, status=status)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def email_detail(request, message_id):
+    """
+    Retorna o email completo para o usuário logado, ou 404 se não existir.
+    """
+    try:
+        email = Email.objects.get(
+            gmail_account__user=request.user,
+            message_id=message_id
+        )
+    except Email.DoesNotExist:
+        return Response({"detail": "Email não encontrado"}, status=status.HTTP_404_NOT_FOUND)
+
+    serializer = EmailSerializer(email)
+    return Response(serializer.data)

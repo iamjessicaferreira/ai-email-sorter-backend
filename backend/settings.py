@@ -17,6 +17,8 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(dotenv_path=BASE_DIR / '.env')
 
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY")
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -42,10 +44,13 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'channels',
+    'django_celery_beat',
+    'django_celery_results',  
+    "api.apps.ApiConfig",
     'corsheaders',
     'rest_framework',
     'social_django',
-    'api',
 ]
 
 MIDDLEWARE = [
@@ -160,7 +165,9 @@ SOCIAL_AUTH_GOOGLE_OAUTH2_SCOPE = [
 
 SOCIAL_AUTH_GOOGLE_OAUTH2_EXTRA_DATA = ['refresh_token', 'access_token', 'expires']
 
-LOGIN_REDIRECT_URL = '/api/auth/success/' # endpoint para redirecionar após login
+# depois do OAuth via social-auth, invoca sua view `auth_complete_redirect`
+SOCIAL_AUTH_LOGIN_REDIRECT_URL = "http://localhost:3000/"
+SOCIAL_AUTH_LOGIN_ERROR_URL    = "http://localhost:3000/"
 LOGOUT_REDIRECT_URL = '/'
 
 SOCIAL_AUTH_GOOGLE_OAUTH2_IGNORE_DEFAULT_SCOPE = True
@@ -192,3 +199,30 @@ SOCIAL_AUTH_PIPELINE = (
 
 
 HF_API_TOKEN = os.getenv("HF_API_TOKEN")
+
+CELERY_BROKER_URL = "redis://localhost:6379/0"
+CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+
+ASGI_APPLICATION = "backend.asgi.application"
+
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [("127.0.0.1", 6379)],
+        },
+    },
+}
+
+CELERY_BEAT_SCHEDULE = {
+    "pull-gmail-notifications-every-5s": {
+        "task": "api.tasks.pull_pubsub_messages",
+        "schedule": 5.0,
+    }
+    # você também pode agendar renovação do watch aqui
+}
+
+
+GCLOUD_PROJECT = "ai-email-sorter-466319"
+PUBSUB_SUBSCRIPTION_ID = "gmail-notifications-sub"
+GMAIL_PUBSUB_TOPIC = "projects/ai-email-sorter-466319/topics/gmail-notifications"
