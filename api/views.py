@@ -138,7 +138,7 @@ def archive_email(request):
         return Response({"message": "Email successfully archived"})
     else:
         return Response({"error": "Failed to archive email"}, status=500)
-
+    
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def delete_emails(request):

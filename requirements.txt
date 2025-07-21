@@ -3,6 +3,7 @@ asgiref==3.9.1
 attrs==25.3.0
 autobahn==24.4.2
 Automat==25.4.16
+beautifulsoup4==4.13.4
 billiard==4.2.1
 cachetools==5.5.2
 celery==5.5.3
@@ -42,6 +43,7 @@ hyperlink==21.0.0
 idna==3.10
 importlib_metadata==8.7.0
 incremental==24.7.2
+iniconfig==2.1.0
 kombu==5.5.4
 msgpack==1.1.1
 oauthlib==3.3.1
@@ -50,6 +52,7 @@ opentelemetry-sdk==1.35.0
 opentelemetry-semantic-conventions==0.56b0
 packaging==25.0
 playwright==1.53.0
+pluggy==1.6.0
 prompt_toolkit==3.0.51
 proto-plus==1.26.1
 protobuf==6.31.1
@@ -57,11 +60,15 @@ pyasn1==0.6.1
 pyasn1_modules==0.4.2
 pycparser==2.22
 pyee==13.0.0
+Pygments==2.19.2
 PyJWT==2.10.1
 pyOpenSSL==25.1.0
 pyparsing==3.2.3
+pytest==8.4.1
+pytest-django==4.11.1
 python-crontab==3.3.0
 python-dateutil==2.9.0.post0
+python-decouple==3.8
 python-dotenv==1.1.1
 python3-openid==3.2.0
 redis==6.2.0
@@ -73,6 +80,7 @@ setuptools==80.9.0
 six==1.17.0
 social-auth-app-django==5.5.1
 social-auth-core==4.7.0
+soupsieve==2.7
 sqlparse==0.5.3
 Twisted==25.5.0
 txaio==25.6.1

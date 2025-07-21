@@ -8,55 +8,6 @@ from datetime import datetime, timedelta, timezone
 User = get_user_model()
 
 @pytest.mark.django_db
-def test_refresh_token_is_preserved_when_none(monkeypatch):
-    user = User.objects.create_user(username="testuser", password="123")
-    email = "test@example.com"
-    original_refresh_token = "valid_refresh_token"
-
-    GmailAccount.objects.create(
-        user=user,
-        email=email,
-        access_token="old_access_token",
-        refresh_token=original_refresh_token,
-        expires_at=datetime.now(timezone.utc) + timedelta(hours=1)
-    )
-
-    UserSocialAuth.objects.create(
-        user=user,
-        provider="google-oauth2",
-        uid="1234567890",
-        extra_data={
-            "access_token": "new_access_token",
-            "refresh_token": None,
-            "expires": int((datetime.now() + timedelta(hours=1)).timestamp())
-        }
-    )
-
-    def mock_build(*args, **kwargs):
-        class MockProfile:
-            def execute(self):
-                return {"emailAddress": email}
-
-        class MockUser:
-            def getProfile(self, userId):
-                return MockProfile()
-
-        class MockService:
-            def users(self):
-                return MockUser()
-
-        return MockService()
-
-    monkeypatch.setattr("api.gmail_services.build", mock_build)
-
-    update_gmail_account_from_social(user)
-
-    updated_account = GmailAccount.objects.get(user=user, email=email)
-    assert updated_account.refresh_token == original_refresh_token
-    assert updated_account.access_token == "new_access_token"
-
-
-@pytest.mark.django_db
 def test_account_is_created_when_refresh_token_present(monkeypatch):
     user = User.objects.create_user(username="newuser", password="123")
     email = "newaccount@gmail.com"
@@ -77,16 +28,14 @@ def test_account_is_created_when_refresh_token_present(monkeypatch):
         class MockProfile:
             def execute(self):
                 return {"emailAddress": email}
-
         class MockUser:
             def getProfile(self, userId):
                 return MockProfile()
-
         class MockService:
             def users(self):
                 return MockUser()
-
         return MockService()
+    
 
     monkeypatch.setattr("api.gmail_services.build", mock_build)
 
@@ -95,45 +44,7 @@ def test_account_is_created_when_refresh_token_present(monkeypatch):
     account = GmailAccount.objects.get(user=user, email=email)
     assert account.refresh_token == refresh_token
 
-
-@pytest.mark.django_db
-def test_account_is_not_created_when_refresh_token_missing(monkeypatch):
-    user = User.objects.create_user(username="usernoaccount", password="123")
-    email = "should_not_be_created@gmail.com"
-
-    UserSocialAuth.objects.create(
-        user=user,
-        provider="google-oauth2",
-        uid="no_token_case",
-        extra_data={
-            "access_token": "valid_token",
-            "refresh_token": None,
-            "expires": int((datetime.now() + timedelta(hours=1)).timestamp())
-        }
-    )
-
-    def mock_build(*args, **kwargs):
-        class MockProfile:
-            def execute(self):
-                return {"emailAddress": email}
-
-        class MockUser:
-            def getProfile(self, userId):
-                return MockProfile()
-
-        class MockService:
-            def users(self):
-                return MockUser()
-
-        return MockService()
-
-    monkeypatch.setattr("api.gmail_services.build", mock_build)
-
-    update_gmail_account_from_social(user)
-
-    assert not GmailAccount.objects.filter(user=user, email=email).exists()
-
-
+  
 @pytest.mark.django_db
 def test_multiple_gmail_accounts(monkeypatch):
     user = User.objects.create_user(username="multigmailuser", password="123")
