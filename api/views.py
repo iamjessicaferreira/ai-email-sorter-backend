@@ -26,7 +26,6 @@ import os
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
 def auth_complete_redirect(request):
     """
     Callback for social-auth: updates/creates the GmailAccount,
