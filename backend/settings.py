@@ -166,3 +166,13 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Definição do Celery e Broker
 CELERY_BROKER_URL = config('CELERY_BROKER_URL', default="redis://localhost:6379/0")
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.SessionAuthentication',
+        'rest_framework.authentication.TokenAuthentication',  
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated', 
+    ],
+}
