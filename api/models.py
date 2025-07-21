@@ -9,7 +9,7 @@ class GmailAccount(models.Model):
     refresh_token = models.CharField(max_length=255)
     access_token = models.CharField(max_length=255)
     expires_at = models.DateTimeField(null=True, blank=True)
-    last_history_id  = models.CharField(max_length=64, blank=True, null=True)
+    last_history_id = models.CharField(max_length=64, blank=True, null=True)
     watch_expires_at = models.DateTimeField(blank=True, null=True)
 
     def __str__(self):
@@ -37,4 +37,4 @@ class Email(models.Model):
     wasReviewedByAI = models.BooleanField(default=False)
 
     def __str__(self):
-        return self.subject or self.snippet or "E-mail"
+        return self.subject or self.snippet or "Email"

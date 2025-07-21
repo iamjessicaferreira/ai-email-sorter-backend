@@ -6,11 +6,12 @@ from rest_framework.response import Response
 from social_django.models import UserSocialAuth
 from django.shortcuts import redirect
 from rest_framework import viewsets, permissions
+
+from api.utils import _automate_unsubscribe, extract_unsubscribe_links
 from .models import EmailCategory, GmailAccount, Email
 from .serializers import EmailCategorySerializer, EmailSerializer
-from .gmail_services import _automate_unsubscribe, archive_email_on_gmail, get_gmail_service, update_gmail_account_from_social, fetch_and_store_emails
+from .gmail_services import archive_email_on_gmail, get_gmail_service, update_gmail_account_from_social, fetch_and_store_emails
 from rest_framework import status
-
 
 from django.views.decorators.csrf import csrf_exempt
 from google.auth.transport.requests import Request
@@ -28,18 +29,17 @@ import os
 @permission_classes([IsAuthenticated])
 def auth_complete_redirect(request):
     """
-    Callback do social-auth: atualiza/cria GmailAccount
-    e depois redireciona o navegador para a Dashboard no front.
+    Callback for social-auth: updates/creates the GmailAccount,
+    then redirects the browser to the frontend Dashboard.
     """
     update_gmail_account_from_social(request.user)
-    # URL da sua aplicação React
     return redirect("http://localhost:3000/")
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def auth_accounts_list(request):
     """
-    Retorna JSON com todas as GmailAccount do user.
+    Returns JSON with all GmailAccount objects for the user.
     """
     update_gmail_account_from_social(request.user)
     qs = GmailAccount.objects.filter(user=request.user)
@@ -49,9 +49,11 @@ def auth_accounts_list(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def list_google_accounts(request):
+    """
+    Returns all linked Google OAuth accounts for the authenticated user.
+    """
     accounts = UserSocialAuth.objects.filter(user=request.user, provider='google-oauth2')
     data = []
-    
     for account in accounts:
         data.append({
             'uid': account.uid,
@@ -63,32 +65,45 @@ def list_google_accounts(request):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def disconnect_google_account(request):
+    """
+    Disconnects a specific Google account and removes the associated GmailAccount.
+    """
     uid = request.data.get('uid')
     if not uid:
         return Response({'error': 'UID is required'}, status=400)
-
     try:
         account = UserSocialAuth.objects.get(user=request.user, provider='google-oauth2', uid=uid)
         account.delete()
-        # Deletar ou desativar o GmailAccount correspondente
         GmailAccount.objects.filter(user=request.user, uid=uid).delete()
-        return Response({'message': 'Conta Google desconectada com sucesso'})
+        return Response({'message': 'Google account disconnected successfully'})
     except UserSocialAuth.DoesNotExist:
-        return Response({'error': 'Conta não encontrada'}, status=404)
+        return Response({'error': 'Account not found'}, status=404)
 
 class EmailCategoryViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing email categories per user.
+    """
     serializer_class = EmailCategorySerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        """
+        Returns the queryset for the current user's categories.
+        """
         return EmailCategory.objects.filter(user=self.request.user)
 
     def perform_create(self, serializer):
+        """
+        Sets the user as the owner of the category upon creation.
+        """
         serializer.save(user=self.request.user)
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def has_refresh_token(request):
+    """
+    Checks if the authenticated user has a GmailAccount with a refresh token.
+    """
     user = request.user
     try:
         gmail_account = GmailAccount.objects.get(user=user)
@@ -101,15 +116,18 @@ def has_refresh_token(request):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def archive_email(request):
+    """
+    Archives the given email (by message_id) for the current user in both Gmail and local DB.
+    """
     user = request.user
     message_id = request.data.get("message_id")
 
     if not message_id:
-        return Response({"error": "message_id é obrigatório"}, status=400)
+        return Response({"error": "message_id is required"}, status=400)
 
     email_obj = Email.objects.filter(message_id=message_id, gmail_account__user=user).first()
     if not email_obj:
-        return Response({"error": "Email não encontrado"}, status=404)
+        return Response({"error": "Email not found"}, status=404)
 
     service = get_gmail_service(email_obj.gmail_account)
     success = archive_email_on_gmail(service, message_id)
@@ -117,15 +135,16 @@ def archive_email(request):
     if success:
         email_obj.is_archived = True
         email_obj.save()
-        return Response({"message": "Email arquivado com sucesso"})
+        return Response({"message": "Email successfully archived"})
     else:
-        return Response({"error": "Erro ao arquivar email"}, status=500)
+        return Response({"error": "Failed to archive email"}, status=500)
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def delete_emails(request):
     """
-    Recebe {"email_ids": ["<msgId>", ...]} e deleta cada um no Gmail e no nosso DB.
+    Receives {"email_ids": ["<msgId>", ...]} and deletes each one in Gmail and our DB.
+    Returns 207 if any deletions failed, 200 otherwise.
     """
     user = request.user
     email_ids = request.data.get('email_ids', [])
@@ -133,21 +152,20 @@ def delete_emails(request):
     successes = []
 
     for msg_id in email_ids:
-        # garante que pertence ao usuário logado
         email_obj = Email.objects.filter(
             gmail_account__user=user,
             message_id=msg_id
         ).first()
 
         if not email_obj:
-            failures.append({'id': msg_id, 'error': 'não encontrado'})
+            failures.append({'id': msg_id, 'error': 'not found'})
             continue
 
         service = get_gmail_service(email_obj.gmail_account)
         try:
             service.users().messages().trash(userId='me', id=msg_id).execute()
             email_obj.delete()
-            successes.append(msg_id)  # <-- aqui!
+            successes.append(msg_id)
         except HttpError as e:
             failures.append({'id': msg_id, 'error': f'Gmail API: {e.resp.status}'})
         except Exception as e:
@@ -155,7 +173,7 @@ def delete_emails(request):
 
     if failures:
         return Response({
-            "message": "Algumas deleções falharam",
+            "message": "Some deletions failed",
             "successes": successes,
             "failures": failures
         }, status=207)
@@ -166,8 +184,8 @@ def delete_emails(request):
 @permission_classes([IsAuthenticated])
 def unsubscribe_emails(request):
     """
-    Tenta dar unsubscribe em cada email; só conta como sucesso se
-    encontrou o link e completou a ação.
+    Attempts to unsubscribe from each email; success only if link found and action completed.
+    Returns captcha-specific error if a captcha is detected.
     """
     user = request.user
     email_ids = request.data.get('email_ids', [])
@@ -179,33 +197,50 @@ def unsubscribe_emails(request):
             gmail_account__user=user, message_id=msg_id
         ).first()
         if not email_obj:
-            failures.append({'id': msg_id, 'error': 'não encontrado no DB'})
+            failures.append({'id': msg_id, 'error': 'not found in DB'})
             continue
 
-        # aqui você passa o body ou URL pra sua rotina de Playwright
-        try:
-            unsub_ok = _automate_unsubscribe(email_obj.body)
-        except Exception as e:
-            failures.append({'id': msg_id, 'error': str(e)})
+        unsubscribe_links = extract_unsubscribe_links(email_obj.body)
+
+        if not unsubscribe_links:
+            print(f"[UNSUBSCRIBE] No link found for email {msg_id}")
+            failures.append({'id': msg_id, 'error': 'No unsubscribe link found'})
             continue
 
-        if unsub_ok:
-            success_ids.append(msg_id)
-            # flag opcional no DB
-            email_obj.is_unsubscribed = True
-            email_obj.save()
-        else:
-            failures.append({'id': msg_id,
-                             'error': 'Nenhum link de unsubscribe encontrado'})
-    status = 207 if failures else 200
-    return Response({'success_ids': success_ids, 'failures': failures}, status=status)
+        unsubscribed = False
+        for link in unsubscribe_links:
+            print(f"[UNSUBSCRIBE] Trying to unsubscribe from link: {link} (email {msg_id})")
+            try:
+                result = asyncio.run(_automate_unsubscribe(link))
+                if result == "success":
+                    print(f"[UNSUBSCRIBE] SUCCESS on link: {link} (email {msg_id})")
+                    success_ids.append(msg_id)
+                    unsubscribed = True
+                    email_obj.is_unsubscribed = True
+                    email_obj.save()
+                    break
+                elif result == "captcha":
+                    print(f"[UNSUBSCRIBE] Captcha detected on link: {link} (email {msg_id})")
+                    failures.append({'id': msg_id, 'error': 'Unable to unsubscribe due to a captcha on the page.'})
+                    unsubscribed = True
+                    break
+                else:
+                    print(f"[UNSUBSCRIBE] Failed to unsubscribe on link: {link} (email {msg_id})")
+            except Exception as e:
+                print(f"[UNSUBSCRIBE] Error while trying to unsubscribe: {link} (email {msg_id}): {e}")
+                continue
 
+        if not unsubscribed:
+            failures.append({'id': msg_id, 'error': 'Unable to click/unsubscribe.'})
+
+    status_code = 207 if failures else 200
+    return Response({'success_ids': success_ids, 'failures': failures}, status=status_code)
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def email_detail(request, message_id):
     """
-    Retorna o email completo para o usuário logado, ou 404 se não existir.
+    Returns the full email for the logged in user, or 404 if not found.
     """
     try:
         email = Email.objects.get(
@@ -213,7 +248,7 @@ def email_detail(request, message_id):
             message_id=message_id
         )
     except Email.DoesNotExist:
-        return Response({"detail": "Email não encontrado"}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"detail": "Email not found"}, status=status.HTTP_404_NOT_FOUND)
 
     serializer = EmailSerializer(email)
     return Response(serializer.data)

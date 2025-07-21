@@ -8,8 +8,7 @@ from datetime import datetime, timedelta, timezone
 User = get_user_model()
 
 @pytest.mark.django_db
-def test_refresh_token_preserved_when_none(monkeypatch):
-    # Cria usuário e GmailAccount com refresh_token válido
+def test_refresh_token_is_preserved_when_none(monkeypatch):
     user = User.objects.create_user(username="testuser", password="123")
     email = "test@example.com"
     original_refresh_token = "valid_refresh_token"
@@ -22,19 +21,17 @@ def test_refresh_token_preserved_when_none(monkeypatch):
         expires_at=datetime.now(timezone.utc) + timedelta(hours=1)
     )
 
-    # Cria um UserSocialAuth com refresh_token=None
     UserSocialAuth.objects.create(
         user=user,
         provider="google-oauth2",
         uid="1234567890",
         extra_data={
             "access_token": "new_access_token",
-            "refresh_token": None,  # <- o ponto crítico
+            "refresh_token": None,
             "expires": int((datetime.now() + timedelta(hours=1)).timestamp())
         }
     )
 
-    # Mock do Google API para retornar o mesmo email
     def mock_build(*args, **kwargs):
         class MockProfile:
             def execute(self):
@@ -52,16 +49,15 @@ def test_refresh_token_preserved_when_none(monkeypatch):
 
     monkeypatch.setattr("api.gmail_services.build", mock_build)
 
-    # Executa a função
     update_gmail_account_from_social(user)
 
-    # Verifica se o refresh_token original foi preservado
     updated_account = GmailAccount.objects.get(user=user, email=email)
     assert updated_account.refresh_token == original_refresh_token
     assert updated_account.access_token == "new_access_token"
 
+
 @pytest.mark.django_db
-def test_account_created_when_refresh_token_present(monkeypatch):
+def test_account_is_created_when_refresh_token_present(monkeypatch):
     user = User.objects.create_user(username="newuser", password="123")
     email = "newaccount@gmail.com"
     refresh_token = "new_refresh_token"
@@ -99,8 +95,9 @@ def test_account_created_when_refresh_token_present(monkeypatch):
     account = GmailAccount.objects.get(user=user, email=email)
     assert account.refresh_token == refresh_token
 
+
 @pytest.mark.django_db
-def test_account_not_created_if_refresh_token_missing(monkeypatch):
+def test_account_is_not_created_when_refresh_token_missing(monkeypatch):
     user = User.objects.create_user(username="usernoaccount", password="123")
     email = "should_not_be_created@gmail.com"
 
@@ -136,29 +133,27 @@ def test_account_not_created_if_refresh_token_missing(monkeypatch):
 
     assert not GmailAccount.objects.filter(user=user, email=email).exists()
 
+
 @pytest.mark.django_db
 def test_multiple_gmail_accounts(monkeypatch):
     user = User.objects.create_user(username="multigmailuser", password="123")
 
-    # Contas conectadas
     emails = ["acc1@gmail.com", "acc2@gmail.com", "acc3@gmail.com"]
-    tokens = ["token1", "token2", "token3"]
+    access_tokens = ["token1", "token2", "token3"]
     refresh_tokens = ["refresh1", "refresh2", "refresh3"]
 
-    # Cria três entradas de UserSocialAuth para o mesmo user
     for i in range(3):
         UserSocialAuth.objects.create(
             user=user,
             provider="google-oauth2",
             uid=f"uid-{i}",
             extra_data={
-                "access_token": tokens[i],
+                "access_token": access_tokens[i],
                 "refresh_token": refresh_tokens[i],
                 "expires": int((datetime.now() + timedelta(hours=1)).timestamp())
             }
         )
 
-    # Mock da API para retornar perfis diferentes baseado no access_token
     def mock_build(*args, **kwargs):
         class MockProfile:
             def __init__(self, email):
@@ -178,9 +173,8 @@ def test_multiple_gmail_accounts(monkeypatch):
             def users(self):
                 return MockUser(self.email)
 
-        # Pega o token atual do kwargs
         token = kwargs["credentials"].token
-        index = tokens.index(token)
+        index = access_tokens.index(token)
         email = emails[index]
         return MockService(email)
 
@@ -188,8 +182,7 @@ def test_multiple_gmail_accounts(monkeypatch):
 
     update_gmail_account_from_social(user)
 
-    # Verifica se as 3 contas foram criadas
     for i in range(3):
         account = GmailAccount.objects.get(user=user, email=emails[i])
         assert account.refresh_token == refresh_tokens[i]
-        assert account.access_token == tokens[i]
+        assert account.access_token == access_tokens[i]

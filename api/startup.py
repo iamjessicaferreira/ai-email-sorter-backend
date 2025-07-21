@@ -2,7 +2,6 @@ from django_celery_beat.models import PeriodicTask, IntervalSchedule
 import json
 
 def setup_watch_renewal():
-    # verifica diariamente se algum watch expirou e renova
     schedule, _ = IntervalSchedule.objects.get_or_create(
         every=1, period=IntervalSchedule.DAYS
     )
@@ -11,6 +10,6 @@ def setup_watch_renewal():
         defaults={
             "interval": schedule,
             "task": "api.tasks.renew_gmail_watches",
-            "args": json.dumps([]),  # nenhum argumento
+            "args": json.dumps([]),
         }
     )

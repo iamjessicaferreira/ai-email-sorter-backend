@@ -1,81 +1,62 @@
-import requests
 import os
+import requests
 
-HF_API_TOKEN = os.getenv("HF_API_TOKEN") 
+HF_API_TOKEN = os.getenv("HF_API_TOKEN")
 
-headers = {
+HEADERS = {
     "Authorization": f"Bearer {HF_API_TOKEN}"
 }
 
-def build_prompt(categories, subject, body):
-    category_names = ", ".join([f'"{c["name"]}" ({c["description"]})' for c in categories])
-    
-    return f"""
-Você é um classificador de e-mails inteligente. Seu objetivo é definir qual a categoria ideal para o e-mail recebido de acordo com seu conteúdo e título.
+ZERO_SHOT_CLASSIFICATION_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
+SUMMARIZATION_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-cnn"
+MAX_INPUT_LENGTH = 1024
 
-As categorias disponíveis para serem classificadas são: {category_names}
-
-Se nenhuma delas fizer sentido com o conteúdo do email, defina a categoria como "none".
-
-Atribua a melhor categoria para o e-mail abaixo com base no conteúdo.
-
-Assunto: {subject}
-
-Corpo: {body}
-
-Responda somente com o nome da categoria exata ou "none" caso nenhuma delas se aplique.
-""".strip()
+def build_classification_prompt(categories, subject, body):
+    category_descriptions = ", ".join([f'"{c["name"]}" ({c["description"]})' for c in categories])
+    return (
+        f'You are an intelligent email classifier. Your goal is to define the ideal category for the received email according to its subject and content.\n'
+        f'The available categories are: {category_descriptions}\n'
+        f'If none of them fit the content, set the category as "none".\n'
+        f'Assign the best category for the email below based on its content.\n\n'
+        f'Subject: {subject}\n\n'
+        f'Body: {body}\n\n'
+        f'Respond only with the exact category name or "none" if none apply.'
+    )
 
 def classify_email(subject, body, categories):
-    print('entrou classify')
-    text = f"Assunto: {subject}\nCorpo: {body}"
-    
-    # Monta prompt simples com categorias
-    labels = [c["name"] for c in categories]
-    # Usamos um modelo de classificação multi-label zero-shot
-    API_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
-    
+    email_text = f"Subject: {subject}\nBody: {body}"
+    labels = [category["name"] for category in categories]
+
     payload = {
-        "inputs": text,
+        "inputs": email_text,
         "parameters": {
             "candidate_labels": labels,
             "multi_label": False
         }
     }
-    
+
     try:
-        response = requests.post(API_URL, headers=headers, json=payload)
+        response = requests.post(ZERO_SHOT_CLASSIFICATION_URL, headers=HEADERS, json=payload)
         response.raise_for_status()
         data = response.json()
-        # data['labels'] é lista de categorias ordenadas por score (maior primeiro)
         predicted_category = data['labels'][0]
-        print(f"Categoria retornada pela HF: '{predicted_category}'")
         return predicted_category
-    except Exception as e:
-        print(f"[HF] Erro na classificação do e-mail: {e}")
+    except Exception as error:
+        print(f"[HF] Email classification error: {error}")
         return None
 
-
 def summarize_email(subject, body):
-    print('entrou summarize')
-    # Limitar tamanho do texto para evitar erro 400 (ex: 1024 caracteres)
-    max_len = 1024
-    text = f"Assunto: {subject}\nCorpo: {body}"
-    if len(text) > max_len:
-        text = text[:max_len]
+    email_text = f"Subject: {subject}\nBody: {body}"
+    if len(email_text) > MAX_INPUT_LENGTH:
+        email_text = email_text[:MAX_INPUT_LENGTH]
 
-    API_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-cnn"
-    
     try:
-        response = requests.post(API_URL, headers=headers, json={"inputs": text})
+        response = requests.post(SUMMARIZATION_URL, headers=HEADERS, json={"inputs": email_text})
         response.raise_for_status()
         data = response.json()
-        if isinstance(data, list) and len(data) > 0 and 'summary_text' in data[0]:
-            summary = data[0]['summary_text']
-        else:
-            summary = ""
-        print(f"Resumo gerado pela HF: {summary}")
-        return summary
-    except Exception as e:
-        print(f"[HF] Erro ao resumir o e-mail: {e}")
+        if isinstance(data, list) and data and 'summary_text' in data[0]:
+            return data[0]['summary_text']
+        return ""
+    except Exception as error:
+        print(f"[HF] Email summarization error: {error}")
         return ""
