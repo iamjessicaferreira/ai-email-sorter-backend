@@ -7,6 +7,7 @@ from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.conf import settings
 from django.db import IntegrityError
+from requests import Response, request
 from social_django.models import UserSocialAuth
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -104,7 +105,14 @@ def get_gmail_service(account):
         client_secret=settings.SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET,
         scopes=["https://www.googleapis.com/auth/gmail.modify"],
     )
-    return build('gmail', 'v1', credentials=creds)
+
+    try:
+        return build('gmail', 'v1', credentials=creds)
+    except HttpError as e:
+        if e.resp.status in [401, 403]:
+            UserSocialAuth.objects.filter(user=account.user, provider='google-oauth2', uid=account.uid).delete()
+            GmailAccount.objects.filter(user=account.user, uid=account.uid).delete()
+        raise
 
 def archive_email_on_gmail(service, message_id):
     """
@@ -117,19 +125,32 @@ def archive_email_on_gmail(service, message_id):
     Returns:
         True if successful, False otherwise.
     """
+    user = request.user
+    message_id = request.data.get("message_id")
+
+    if not message_id:
+        return Response({"error": "message_id is required"}, status=400)
+
+    email_obj = Email.objects.filter(message_id=message_id, gmail_account__user=user).first()
+    if not email_obj:
+        return Response({"error": "Email not found"}, status=404)
+
     try:
-        service.users().messages().modify(
-            userId='me',
-            id=message_id,
-            body={
-                'removeLabelIds': ['INBOX']
-            }
-        ).execute()
-        print(f"[GMAIL] Email {message_id} archived successfully.")
-        return True
-    except Exception as e:
-        print(f"[GMAIL ERROR] Error archiving email {message_id}: {e}")
-        return False
+        service = get_gmail_service(email_obj.gmail_account)
+        success = archive_email_on_gmail(service, message_id)
+    except HttpError as e:
+        if e.resp.status in [401, 403]:
+            return Response({"error": "Gmail account expired and was disconnected."}, status=401)
+        return Response({"error": "Unexpected error"}, status=500)
+
+    if success:
+        email_obj.is_archived = True
+        email_obj.save()
+        return Response({"message": "Email successfully archived"})
+    else:
+        return Response({"error": "Failed to archive email"}, status=500)
+
+
 
 def parse_message(full_message):
     """

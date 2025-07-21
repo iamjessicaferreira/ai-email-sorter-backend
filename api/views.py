@@ -142,10 +142,6 @@ def archive_email(request):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def delete_emails(request):
-    """
-    Receives {"email_ids": ["<msgId>", ...]} and deletes each one in Gmail and our DB.
-    Returns 207 if any deletions failed, 200 otherwise.
-    """
     user = request.user
     email_ids = request.data.get('email_ids', [])
     failures = []
@@ -161,13 +157,23 @@ def delete_emails(request):
             failures.append({'id': msg_id, 'error': 'not found'})
             continue
 
-        service = get_gmail_service(email_obj.gmail_account)
         try:
+            service = get_gmail_service(email_obj.gmail_account)
             service.users().messages().trash(userId='me', id=msg_id).execute()
             email_obj.delete()
             successes.append(msg_id)
         except HttpError as e:
-            failures.append({'id': msg_id, 'error': f'Gmail API: {e.resp.status}'})
+            status = getattr(e.resp, 'status', None)
+            if status in [401, 403]:
+                from social_django.models import UserSocialAuth
+                from api.models import GmailAccount
+
+                uid = email_obj.gmail_account.uid
+                UserSocialAuth.objects.filter(user=user, provider='google-oauth2', uid=uid).delete()
+                GmailAccount.objects.filter(user=user, uid=uid).delete()
+                failures.append({'id': msg_id, 'error': 'Gmail account expired and was disconnected.'})
+                break
+            failures.append({'id': msg_id, 'error': f'Gmail API: {status}'})
         except Exception as e:
             failures.append({'id': msg_id, 'error': str(e)})
 
@@ -179,6 +185,16 @@ def delete_emails(request):
         }, status=207)
 
     return Response({"successes": successes, "failures": []}, status=200)
+
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from django.utils.decorators import sync_and_async_middleware
+
+from asgiref.sync import sync_to_async
+import asyncio
+
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -192,6 +208,7 @@ def unsubscribe_emails(request):
     success_ids = []
     failures = []
 
+    # Só processa cada um em sequência (sync)
     for msg_id in email_ids:
         email_obj = Email.objects.filter(
             gmail_account__user=user, message_id=msg_id
@@ -204,24 +221,25 @@ def unsubscribe_emails(request):
 
         if not unsubscribe_links:
             print(f"[UNSUBSCRIBE] No link found for email {msg_id}")
-            failures.append({'id': msg_id, 'error': 'No unsubscribe link found'})
+            failures.append({'id': msg_id,  'subject': email_obj.subject, 'error': 'No unsubscribe link found'})
             continue
 
         unsubscribed = False
         for link in unsubscribe_links:
-            print(f"[UNSUBSCRIBE] Trying to unsubscribe from link: {link} (email {msg_id})")
             try:
+                # Chama a função async DE FORMA BLOQUEANTE (síncrona)
+                import asyncio
                 result = asyncio.run(_automate_unsubscribe(link))
                 if result == "success":
                     print(f"[UNSUBSCRIBE] SUCCESS on link: {link} (email {msg_id})")
                     success_ids.append(msg_id)
-                    unsubscribed = True
                     email_obj.is_unsubscribed = True
                     email_obj.save()
+                    unsubscribed = True
                     break
                 elif result == "captcha":
                     print(f"[UNSUBSCRIBE] Captcha detected on link: {link} (email {msg_id})")
-                    failures.append({'id': msg_id, 'error': 'Unable to unsubscribe due to a captcha on the page.'})
+                    failures.append({'id': msg_id,  'subject': email_obj.subject, 'error': 'Unable to unsubscribe due to a captcha on the page.'})
                     unsubscribed = True
                     break
                 else:
@@ -231,7 +249,7 @@ def unsubscribe_emails(request):
                 continue
 
         if not unsubscribed:
-            failures.append({'id': msg_id, 'error': 'Unable to click/unsubscribe.'})
+            failures.append({'id': msg_id,  'subject': email_obj.subject, 'error': 'Unable to click/unsubscribe.'})
 
     status_code = 207 if failures else 200
     return Response({'success_ids': success_ids, 'failures': failures}, status=status_code)

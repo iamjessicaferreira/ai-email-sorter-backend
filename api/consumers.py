@@ -11,15 +11,16 @@ class EmailConsumer(AsyncJsonWebsocketConsumer):
         await self.accept()
 
     async def disconnect(self, code):
-        await self.channel_layer.group_discard(self.group_name, self.channel_name)
+        if hasattr(self, "group_name"):
+            await self.channel_layer.group_discard(self.group_name, self.channel_name)
 
     async def new_email(self, event):
         await self.send_json({
-            "id": event["id"],
-            "subject": event["subject"],
-            "body": event["body"],
-            "summary": event["summary"],
+            "id":          event["id"],
+            "subject":     event["subject"],
+            "body":        event["body"],
+            "summary":     event["summary"],
             "received_at": event["received_at"],
-            "category": event["category"],
-            "account": event["account"],
+            "category":    event["category"],
+            "account":     event["account"],
         })
