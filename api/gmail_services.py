@@ -17,22 +17,40 @@ from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 from .models import GmailAccount, Email, EmailCategory
 from .ai_services import classify_email, summarize_email
 
+def _get_categories_for_user(user) -> list[dict]:
+    """Helper function to get categories with synonyms for a user."""
+    category_objs = EmailCategory.objects.filter(user=user)
+    return [
+        {
+            "name": cat.name,
+            "description": cat.description,
+            "synonyms": cat.get_synonyms()
+        }
+        for cat in category_objs
+    ]
+
 def update_gmail_account_from_social(user):
     """
     Updates (or creates) the user's GmailAccount from social auth
     and starts a Gmail Pub/Sub watch for new emails.
     """
+    print(f"[UPDATE GMAIL ACCOUNT] Starting for user: {user.username} (id: {user.id})")
     social_accounts = UserSocialAuth.objects.filter(
         user=user,
         provider='google-oauth2'
     )
+    print(f"[UPDATE GMAIL ACCOUNT] Found {social_accounts.count()} social accounts")
     for social in social_accounts:
+        print(f"[UPDATE GMAIL ACCOUNT] Processing social account uid: {social.uid}")
         access_token = social.extra_data.get('access_token')
         refresh_token = social.extra_data.get('refresh_token')
         expires_ts = social.extra_data.get('expires')
         uid = social.uid
 
+        print(f"[UPDATE GMAIL ACCOUNT] uid: {uid}, has_access_token: {bool(access_token)}, has_refresh_token: {bool(refresh_token)}")
+
         if not access_token:
+            print(f"[UPDATE GMAIL ACCOUNT] Skipping {uid} - no access_token")
             continue
 
         expires_at = None
@@ -50,7 +68,7 @@ def update_gmail_account_from_social(user):
             client_secret=settings.SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET,
             scopes=[
                 "https://www.googleapis.com/auth/gmail.readonly",
-                "https://www.googleapis.com/auth/gmail.metadata",
+                "https://www.googleapis.com/auth/gmail.modify",
             ],
         )
 
@@ -58,20 +76,51 @@ def update_gmail_account_from_social(user):
             service = build('gmail', 'v1', credentials=creds)
             profile = service.users().getProfile(userId='me').execute()
             email_address = profile.get('emailAddress')
+            print(f"[UPDATE GMAIL ACCOUNT] Got email address: {email_address} for uid: {uid}")
         except Exception as e:
-            print(f"[OAuth ERROR] Error getting Gmail profile: {e}")
+            print(f"[OAuth ERROR] Error getting Gmail profile for uid {uid}: {e}")
+            import traceback
+            traceback.print_exc()
             continue
 
+        # Check if account exists for this user and uid
+        try:
+            existing_account = GmailAccount.objects.get(user=user, uid=uid)
+            refresh_token_to_use = refresh_token or existing_account.refresh_token
+        except GmailAccount.DoesNotExist:
+            # Check if account exists with this uid but different user (shouldn't happen, but handle it)
+            try:
+                existing_account_other_user = GmailAccount.objects.get(uid=uid)
+                # If account exists for different user, update it to current user
+                existing_account_other_user.user = user
+                existing_account_other_user.save()
+                refresh_token_to_use = refresh_token or existing_account_other_user.refresh_token
+                existing_account = existing_account_other_user
+            except GmailAccount.DoesNotExist:
+                existing_account = None
+                refresh_token_to_use = refresh_token or ''
+        
         account, created = GmailAccount.objects.update_or_create(
             uid=uid,
             defaults={
                 'user': user,
                 'email': email_address,
                 'access_token': access_token,
-                'refresh_token': refresh_token or account.refresh_token,
+                'refresh_token': refresh_token_to_use,
                 'expires_at': expires_at,
             }
         )
+        
+        # Ensure the account belongs to the current user
+        if account.user != user:
+            account.user = user
+            account.save()
+        
+        if refresh_token and not account.refresh_token:
+            account.refresh_token = refresh_token
+            account.save()
+        
+        print(f"[GMAIL ACCOUNT] {'Created' if created else 'Updated'} GmailAccount: {email_address} (uid: {uid}) for user: {user.username}")
 
         try:
             watch_body = {
@@ -262,11 +311,26 @@ def handle_gmail_history(email_address: str, new_history_id: str):
 
             subject, body, received_at = parse_message(full)
             sender = extract_sender(full)
-            categories = list(EmailCategory.objects.filter(
-                user=account.user
-            ).values("name", "description"))
-            category_name = classify_email(subject, body, categories)
-            summary = summarize_email(subject, body)
+            categories = _get_categories_for_user(account.user)
+            print(f"[EMAIL] Processing email '{subject[:50]}...' for user {account.user.id}")
+            print(f"[EMAIL] Found {len(categories)} categories: {[c['name'] for c in categories]}")
+            
+            category_name = None
+            try:
+                category_name = classify_email(subject, body, categories)
+                print(f"[EMAIL] Classification result: {category_name}")
+            except Exception as e:
+                print(f"[EMAIL] ERROR during classification: {e}")
+                import traceback
+                traceback.print_exc()
+                category_name = None
+            
+            summary = None
+            try:
+                summary = summarize_email(subject, body)
+            except Exception as e:
+                print(f"[EMAIL] ERROR during summarization: {e}")
+                summary = ""
 
             service.users().messages().modify(
                 userId="me",
@@ -274,40 +338,65 @@ def handle_gmail_history(email_address: str, new_history_id: str):
                 body={"removeLabelIds": ["INBOX"]}
             ).execute()
 
-            category_obj = EmailCategory.objects.filter(
-                user=account.user, name=category_name
-            ).first()
+            category_obj = None
+            if category_name:
+                # Try exact match first
+                category_obj = EmailCategory.objects.filter(
+                    user=account.user, name=category_name
+                ).first()
+                
+                # If not found, try case-insensitive match
+                if not category_obj:
+                    category_obj = EmailCategory.objects.filter(
+                        user=account.user
+                    ).extra(where=["LOWER(name) = LOWER(%s)"], params=[category_name]).first()
+                
+                if not category_obj:
+                    print(f"[EMAIL] WARNING: Category '{category_name}' not found in database for user {account.user.id}")
+                    print(f"[EMAIL] Available categories: {[c.name for c in EmailCategory.objects.filter(user=account.user)]}")
+                else:
+                    print(f"[EMAIL] Category object found: {category_obj.name} (id: {category_obj.id})")
+                    # Use the actual category name from database (normalized)
+                    category_name = category_obj.name
+            else:
+                print(f"[EMAIL] No category assigned (category_name is None or empty)")
+            
             try:
                 email_obj = Email.objects.create(
                     gmail_account=account,
                     message_id=msg_id,
                     subject=subject,
                     body=body,
-                    summary=summary,
+                    summary=summary or "",
                     received_at=received_at,
                     wasReviewedByAI=True,
                     category=category_obj,
                     is_archived=True,
                     sender=sender,
                 )
+                print(f"[EMAIL] Created email: {msg_id} - {subject[:50]}")
             except IntegrityError:
                 print(f"[DB] Race/duplicate on {msg_id}, skipping")
                 continue
 
-            channel_layer = get_channel_layer()
-            async_to_sync(channel_layer.group_send)(
-                f"user_{account.user.id}",
-                {
-                    "type": "new_email",
-                    "id": email_obj.message_id,
-                    "subject": email_obj.subject,
-                    "body": email_obj.body,
-                    "summary": email_obj.summary,
-                    "received_at": email_obj.received_at.isoformat(),
-                    "category": category_name,
-                    "account": account.email,
-                },
-            )
+            try:
+                channel_layer = get_channel_layer()
+                async_to_sync(channel_layer.group_send)(
+                    f"user_{account.user.id}",
+                    {
+                        "type": "new_email",
+                        "id": email_obj.message_id,
+                        "subject": email_obj.subject,
+                        "body": email_obj.body,
+                        "summary": email_obj.summary or "",
+                        "received_at": email_obj.received_at.isoformat(),
+                        "category": category_name or "none",
+                        "account": account.email,
+                    },
+                )
+                print(f"[WEBSOCKET] Sent email {msg_id} to user_{account.user.id}")
+            except Exception as e:
+                print(f"[WEBSOCKET ERROR] Failed to send email via WebSocket: {e}")
 
     account.last_history_id = new_history_id
     account.save()
@@ -325,11 +414,9 @@ def fetch_and_store_emails(user, limit: int = 10):
         list: List of new Email objects created.
     """
     new_emails = []
+    categories = _get_categories_for_user(user)
     for account in GmailAccount.objects.filter(user=user):
         service = get_gmail_service(account)
-        categories = list(
-            EmailCategory.objects.filter(user=user).values("name", "description")
-        )
         try:
             resp = service.users().messages().list(
                 userId="me", labelIds=["INBOX"], q="is:unread", maxResults=limit
@@ -348,8 +435,25 @@ def fetch_and_store_emails(user, limit: int = 10):
             ).execute()
             subject, body, received_at = parse_message(full)
             sender = extract_sender(full)
-            category_name = classify_email(subject, body, categories)
-            summary = summarize_email(subject, body)
+            print(f"[EMAIL] Processing email '{subject[:50]}...' for user {user.id}")
+            print(f"[EMAIL] Found {len(categories)} categories: {[c['name'] for c in categories]}")
+            
+            category_name = None
+            try:
+                category_name = classify_email(subject, body, categories)
+                print(f"[EMAIL] Classification result: {category_name}")
+            except Exception as e:
+                print(f"[EMAIL] ERROR during classification: {e}")
+                import traceback
+                traceback.print_exc()
+                category_name = None
+            
+            summary = None
+            try:
+                summary = summarize_email(subject, body)
+            except Exception as e:
+                print(f"[EMAIL] ERROR during summarization: {e}")
+                summary = ""
             try:
                 service.users().messages().modify(
                     userId='me', id=msg_id,
@@ -359,9 +463,28 @@ def fetch_and_store_emails(user, limit: int = 10):
                 print(f"[GMAIL ERROR] Archiving {msg_id} failed: {e}")
 
             try:
-                category_obj = EmailCategory.objects.filter(
-                    user=user, name=category_name
-                ).first()
+                category_obj = None
+                if category_name:
+                    # Try exact match first
+                    category_obj = EmailCategory.objects.filter(
+                        user=user, name=category_name
+                    ).first()
+                    
+                    # If not found, try case-insensitive match
+                    if not category_obj:
+                        category_obj = EmailCategory.objects.filter(
+                            user=user
+                        ).extra(where=["LOWER(name) = LOWER(%s)"], params=[category_name]).first()
+                    
+                    if not category_obj:
+                        print(f"[EMAIL] WARNING: Category '{category_name}' not found in database for user {user.id}")
+                        print(f"[EMAIL] Available categories: {[c.name for c in EmailCategory.objects.filter(user=user)]}")
+                    else:
+                        print(f"[EMAIL] Category object found: {category_obj.name} (id: {category_obj.id})")
+                        # Use the actual category name from database (normalized)
+                        category_name = category_obj.name
+                else:
+                    print(f"[EMAIL] No category assigned (category_name is None or empty)")
 
                 email_obj = Email.objects.create(
                     gmail_account=account,
@@ -397,6 +520,79 @@ def fetch_and_store_emails(user, limit: int = 10):
             )
 
     return new_emails
+
+def recategorize_email(email_obj: Email):
+    """
+    Recategorizes an existing email using AI classification.
+    
+    Args:
+        email_obj: Email instance to recategorize
+    
+    Returns:
+        tuple: (success: bool, category_name: str or None, error: str or None)
+    """
+    try:
+        user = email_obj.gmail_account.user
+        categories = _get_categories_for_user(user)
+        
+        if not categories:
+            return False, None, "No categories found for user"
+        
+        print(f"[RECATEGORIZE] Recategorizing email '{email_obj.subject[:50]}...' (id: {email_obj.message_id})")
+        print(f"[RECATEGORIZE] Found {len(categories)} categories: {[c['name'] for c in categories]}")
+        
+        category_name = classify_email(email_obj.subject, email_obj.body, categories)
+        print(f"[RECATEGORIZE] Classification result: {category_name}")
+        
+        category_obj = None
+        if category_name:
+            # Try exact match first
+            category_obj = EmailCategory.objects.filter(
+                user=user, name=category_name
+            ).first()
+            
+            # If not found, try case-insensitive match
+            if not category_obj:
+                category_obj = EmailCategory.objects.filter(
+                    user=user
+                ).extra(where=["LOWER(name) = LOWER(%s)"], params=[category_name]).first()
+            
+            if not category_obj:
+                print(f"[RECATEGORIZE] WARNING: Category '{category_name}' not found in database")
+                print(f"[RECATEGORIZE] Available categories: {[c.name for c in EmailCategory.objects.filter(user=user)]}")
+                return False, category_name, f"Category '{category_name}' not found in database"
+            else:
+                print(f"[RECATEGORIZE] Category object found: {category_obj.name} (id: {category_obj.id})")
+                # Use the actual category name from database (normalized)
+                category_name = category_obj.name
+        else:
+            print(f"[RECATEGORIZE] No category assigned (category_name is None or empty)")
+        
+        email_obj.category = category_obj
+        email_obj.wasReviewedByAI = True
+        email_obj.save()
+        
+        print(f"[RECATEGORIZE] Email successfully recategorized to: {category_name or 'None'}")
+        return True, category_name, None
+        
+    except Exception as e:
+        error_msg = f"Error recategorizing email: {str(e)}"
+        error_type = type(e).__name__
+        print(f"[RECATEGORIZE] {error_msg}")
+        print(f"[RECATEGORIZE] Error type: {error_type}")
+        import traceback
+        traceback_str = traceback.format_exc()
+        print(f"[RECATEGORIZE] Traceback: {traceback_str}")
+        
+        # Provide more specific error messages
+        if "categories" in str(e).lower() or "category" in str(e).lower():
+            return False, None, f"Category error: {str(e)}"
+        elif "classification" in str(e).lower() or "huggingface" in str(e).lower() or "hf" in str(e).lower():
+            return False, None, f"AI classification error: {str(e)}"
+        elif "database" in str(e).lower() or "db" in str(e).lower():
+            return False, None, f"Database error: {str(e)}"
+        else:
+            return False, None, f"{error_type}: {str(e)}"
 
 async def _automate_unsubscribe(url: str) -> bool:
     """

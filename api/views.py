@@ -23,6 +23,7 @@ from googleapiclient.errors import HttpError
 import base64
 import html
 import os
+from django.conf import settings
 
 
 @api_view(['GET'])
@@ -31,8 +32,20 @@ def auth_complete_redirect(request):
     Callback for social-auth: updates/creates the GmailAccount,
     then redirects the browser to the frontend Dashboard.
     """
+    print(f"[AUTH COMPLETE] Processing OAuth callback for user: {request.user.username}")
+    # Update/create GmailAccount from social auth
     update_gmail_account_from_social(request.user)
-    return redirect("http://localhost:3000/")
+    
+    # Verify accounts were created
+    accounts = GmailAccount.objects.filter(user=request.user)
+    print(f"[AUTH COMPLETE] User {request.user.username} now has {accounts.count()} GmailAccount(s): {[a.email for a in accounts]}")
+    
+    redirect_url = getattr(settings, 'SOCIAL_AUTH_LOGIN_REDIRECT_URL', 'http://localhost:3000/')
+    if '?' in redirect_url:
+        redirect_url += '&account_added=true'
+    else:
+        redirect_url += '?account_added=true'
+    return redirect(redirect_url)
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -40,9 +53,27 @@ def auth_accounts_list(request):
     """
     Returns JSON with all GmailAccount objects for the user.
     """
-    update_gmail_account_from_social(request.user)
+    print(f"[AUTH ACCOUNTS] Request from user: {request.user.username} (id: {request.user.id})")
+    
+    # Check social auth accounts first
+    social_accounts = UserSocialAuth.objects.filter(user=request.user, provider='google-oauth2')
+    print(f"[AUTH ACCOUNTS] Found {social_accounts.count()} UserSocialAuth entries: {[s.uid for s in social_accounts]}")
+    
+    # Always update accounts from social auth to ensure all accounts are synced
+    try:
+        update_gmail_account_from_social(request.user)
+    except Exception as e:
+        print(f"[AUTH ACCOUNTS] Error in update_gmail_account_from_social: {e}")
+        import traceback
+        traceback.print_exc()
+    
     qs = GmailAccount.objects.filter(user=request.user)
+    print(f"[AUTH ACCOUNTS] Found {qs.count()} GmailAccount objects for user {request.user.username}")
+    for acc in qs:
+        print(f"[AUTH ACCOUNTS]   - {acc.email} (uid: {acc.uid})")
+    
     data = [{"uid": a.uid, "email": a.email} for a in qs]
+    print(f"[AUTH ACCOUNTS] Returning {len(data)} accounts: {data}")
     return Response(data)
 
 @api_view(['GET'])
@@ -269,3 +300,33 @@ def email_detail(request, message_id):
 
     serializer = EmailSerializer(email)
     return Response(serializer.data)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def recategorize_email(request, message_id):
+    """
+    Recategorizes an email using AI classification.
+    """
+    try:
+        email = Email.objects.get(
+            gmail_account__user=request.user,
+            message_id=message_id
+        )
+    except Email.DoesNotExist:
+        return Response({"detail": "Email not found"}, status=status.HTTP_404_NOT_FOUND)
+    
+    from .gmail_services import recategorize_email as recategorize_email_service
+    success, category_name, error = recategorize_email_service(email)
+    
+    if success:
+        serializer = EmailSerializer(email)
+        return Response({
+            "message": "Email recategorized successfully",
+            "email": serializer.data,
+            "category": category_name
+        })
+    else:
+        return Response({
+            "error": error or "Failed to recategorize email",
+            "category": category_name
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

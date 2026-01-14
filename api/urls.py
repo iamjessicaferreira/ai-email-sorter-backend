@@ -11,6 +11,7 @@ from .views import (
     delete_emails,
     EmailCategoryViewSet,
     unsubscribe_emails,
+    recategorize_email,
 )
 
 router = DefaultRouter()
@@ -26,6 +27,7 @@ urlpatterns = [
     path("archive-emails/", archive_email),
     path("delete-emails/", delete_emails),
     path("unsubscribe-emails/", unsubscribe_emails),
+    path("emails/<str:message_id>/recategorize/", recategorize_email),
     path("emails/<str:message_id>/", email_detail),
     path("", include(router.urls)),
 ]

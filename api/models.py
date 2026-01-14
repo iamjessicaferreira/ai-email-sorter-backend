@@ -1,5 +1,6 @@
 from django.db import models
 from django.contrib.auth.models import User
+import json
 
 class GmailAccount(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='gmail_accounts')
@@ -19,6 +20,18 @@ class EmailCategory(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='categories')
     name = models.CharField(max_length=100)
     description = models.TextField()
+    synonyms = models.TextField(blank=True, default='[]', help_text='JSON array of synonyms for this category')
+
+    def get_synonyms(self):
+        """Returns the list of synonyms as a Python list"""
+        try:
+            return json.loads(self.synonyms) if self.synonyms else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    def set_synonyms(self, synonyms_list):
+        """Sets the synonyms from a Python list"""
+        self.synonyms = json.dumps(synonyms_list) if synonyms_list else '[]'
 
     def __str__(self):
         return f"{self.name} ({self.user.username})"
