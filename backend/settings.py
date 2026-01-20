@@ -2,6 +2,12 @@ from pathlib import Path
 from decouple import config, Csv 
 import os
 
+# Para suportar DATABASE_URL (Neon Database)
+try:
+    import dj_database_url
+except ImportError:
+    dj_database_url = None
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Django settings
@@ -64,6 +70,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',  # Para servir arquivos estáticos em produção
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -119,12 +126,34 @@ SOCIAL_AUTH_GOOGLE_OAUTH2_IGNORE_DEFAULT_SCOPE = True
 CSRF_TRUSTED_ORIGINS = config('CSRF_TRUSTED_ORIGINS', cast=Csv())
 
 # Configurações do banco de dados
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',  
-        'NAME': BASE_DIR / 'db.sqlite3',  
+# Suporta DATABASE_URL (Neon Database), variáveis individuais (PostgreSQL tradicional) ou SQLite (desenvolvimento)
+DATABASE_URL = config('DATABASE_URL', default=None)
+
+if DATABASE_URL and dj_database_url:
+    # Usa DATABASE_URL (Neon Database ou outros serviços que fornecem connection string)
+    DATABASES = {
+        'default': dj_database_url.parse(DATABASE_URL, conn_max_age=600)
     }
-}
+elif config('DB_NAME', default=None):
+    # Usa variáveis individuais (PostgreSQL tradicional no Render)
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': config('DB_NAME'),
+            'USER': config('DB_USER'),
+            'PASSWORD': config('DB_PASSWORD'),
+            'HOST': config('DB_HOST'),
+            'PORT': config('DB_PORT', default='5432'),
+        }
+    }
+else:
+    # Fallback para SQLite (desenvolvimento local)
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',  
+            'NAME': BASE_DIR / 'db.sqlite3',  
+        }
+    }
 
 
 # Celery Settings
@@ -160,6 +189,10 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+# WhiteNoise para servir arquivos estáticos em produção
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
