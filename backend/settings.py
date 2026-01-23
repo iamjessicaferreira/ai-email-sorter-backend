@@ -14,7 +14,20 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 ROOT_URLCONF = 'backend.urls'
 SECRET_KEY = config('DJANGO_SECRET_KEY') 
 DEBUG = config('DJANGO_DEBUG', default=False, cast=bool) 
-ALLOWED_HOSTS = config('DJANGO_ALLOWED_HOSTS', cast=Csv()) 
+# Convert ALLOWED_HOSTS to a mutable list so middleware can modify it
+_allowed_hosts = config('DJANGO_ALLOWED_HOSTS', cast=Csv(), default='localhost,127.0.0.1')
+ALLOWED_HOSTS = list(_allowed_hosts) if isinstance(_allowed_hosts, (list, tuple)) else [_allowed_hosts] if _allowed_hosts else []
+
+# In development, also allow ngrok domains from environment variable
+if DEBUG:
+    ngrok_host = config('NGROK_HOST', default=None)
+    if ngrok_host and ngrok_host not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(ngrok_host)
+        print(f"[SETTINGS] Added NGROK_HOST to ALLOWED_HOSTS: {ngrok_host}")
+
+# In development, allow ngrok domains for webhook testing
+# Note: Django doesn't support wildcards in ALLOWED_HOSTS, so we'll use middleware
+# to handle ngrok domains dynamically 
 
 TEMPLATES = [
     {
@@ -70,6 +83,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'api.middleware.AllowNgrokHostMiddleware',  # Allow ngrok domains in development
     'whitenoise.middleware.WhiteNoiseMiddleware',  # Para servir arquivos estáticos em produção
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -119,6 +133,7 @@ SOCIAL_AUTH_PIPELINE = (
     'social_core.pipeline.social_auth.load_extra_data',
     'api.pipeline.save_email_to_extra_data',
     'social_core.pipeline.user.user_details',
+    'api.pipeline.create_gmail_account_after_auth',  # Create GmailAccount after OAuth completes
 )
 
 SOCIAL_AUTH_GOOGLE_OAUTH2_IGNORE_DEFAULT_SCOPE = True

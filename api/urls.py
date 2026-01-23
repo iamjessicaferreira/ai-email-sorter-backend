@@ -7,11 +7,13 @@ from .views import (
     has_refresh_token,
     list_google_accounts,
     disconnect_google_account,
+    disconnect_all_google_accounts,
     archive_email,
     delete_emails,
     EmailCategoryViewSet,
     unsubscribe_emails,
     recategorize_email,
+    gmail_webhook,
 )
 
 router = DefaultRouter()
@@ -24,10 +26,12 @@ urlpatterns = [
     path("auth/success/", auth_accounts_list, name="auth-accounts-list"),
     path("auth/google-accounts/", list_google_accounts),
     path("auth/disconnect-google/", disconnect_google_account),
+    path("auth/disconnect-all-google/", disconnect_all_google_accounts),
     path("archive-emails/", archive_email),
     path("delete-emails/", delete_emails),
     path("unsubscribe-emails/", unsubscribe_emails),
     path("emails/<str:message_id>/recategorize/", recategorize_email),
     path("emails/<str:message_id>/", email_detail),
+    path("opera/gmail-webhook", gmail_webhook, name="gmail-webhook"),  # Gmail Pub/Sub webhook endpoint
     path("", include(router.urls)),
 ]

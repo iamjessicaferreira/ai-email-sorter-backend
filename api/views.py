@@ -1,5 +1,6 @@
 import asyncio
 import re
+import json
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -10,10 +11,11 @@ from rest_framework import viewsets, permissions
 from api.utils import _automate_unsubscribe, extract_unsubscribe_links
 from .models import EmailCategory, GmailAccount, Email
 from .serializers import EmailCategorySerializer, EmailSerializer
-from .gmail_services import archive_email_on_gmail, get_gmail_service, update_gmail_account_from_social, fetch_and_store_emails
+from .gmail_services import archive_email_on_gmail, get_gmail_service, update_gmail_account_from_social, fetch_and_store_emails, handle_gmail_history
 from rest_framework import status
 
 from django.views.decorators.csrf import csrf_exempt
+from django.http import JsonResponse
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -52,20 +54,44 @@ def auth_complete_redirect(request):
 def auth_accounts_list(request):
     """
     Returns JSON with all GmailAccount objects for the user.
+    Also cleans up orphaned GmailAccounts (accounts without corresponding UserSocialAuth).
     """
     print(f"[AUTH ACCOUNTS] Request from user: {request.user.username} (id: {request.user.id})")
     
     # Check social auth accounts first
     social_accounts = UserSocialAuth.objects.filter(user=request.user, provider='google-oauth2')
-    print(f"[AUTH ACCOUNTS] Found {social_accounts.count()} UserSocialAuth entries: {[s.uid for s in social_accounts]}")
+    social_uids = set(social_accounts.values_list('uid', flat=True))
+    print(f"[AUTH ACCOUNTS] Found {social_accounts.count()} UserSocialAuth entries: {list(social_uids)}")
     
-    # Always update accounts from social auth to ensure all accounts are synced
-    try:
-        update_gmail_account_from_social(request.user)
-    except Exception as e:
-        print(f"[AUTH ACCOUNTS] Error in update_gmail_account_from_social: {e}")
-        import traceback
-        traceback.print_exc()
+    # Clean up orphaned GmailAccounts (accounts without corresponding UserSocialAuth)
+    gmail_accounts = GmailAccount.objects.filter(user=request.user)
+    orphaned_accounts = []
+    for account in gmail_accounts:
+        if account.uid not in social_uids:
+            print(f"[AUTH ACCOUNTS] Found orphaned GmailAccount: {account.email} (uid: {account.uid}) - no matching UserSocialAuth")
+            orphaned_accounts.append(account)
+    
+    if orphaned_accounts:
+        print(f"[AUTH ACCOUNTS] Cleaning up {len(orphaned_accounts)} orphaned GmailAccount(s)")
+        for account in orphaned_accounts:
+            # Delete associated emails
+            from .models import Email
+            email_count = Email.objects.filter(gmail_account=account).count()
+            Email.objects.filter(gmail_account=account).delete()
+            print(f"[AUTH ACCOUNTS] Deleted {email_count} emails for orphaned account {account.email}")
+            # Delete the account
+            account.delete()
+            print(f"[AUTH ACCOUNTS] Deleted orphaned GmailAccount {account.email}")
+    
+    # CRITICAL: NEVER call update_gmail_account_from_social from auth_accounts_list
+    # This prevents automatic reconnection when user has disconnected accounts.
+    # The pipeline (create_gmail_account_after_auth) handles account creation during OAuth.
+    # This endpoint should ONLY return existing accounts, not create new ones.
+    
+    if social_accounts.exists():
+        print(f"[AUTH ACCOUNTS] Found {social_accounts.count()} social accounts, but NOT calling update_gmail_account_from_social to prevent auto-reconnection")
+    else:
+        print(f"[AUTH ACCOUNTS] No social accounts found")
     
     qs = GmailAccount.objects.filter(user=request.user)
     print(f"[AUTH ACCOUNTS] Found {qs.count()} GmailAccount objects for user {request.user.username}")
@@ -97,17 +123,97 @@ def list_google_accounts(request):
 def disconnect_google_account(request):
     """
     Disconnects a specific Google account and removes the associated GmailAccount.
+    Also deletes all emails associated with this account.
     """
     uid = request.data.get('uid')
     if not uid:
         return Response({'error': 'UID is required'}, status=400)
-    try:
-        account = UserSocialAuth.objects.get(user=request.user, provider='google-oauth2', uid=uid)
-        account.delete()
-        GmailAccount.objects.filter(user=request.user, uid=uid).delete()
-        return Response({'message': 'Google account disconnected successfully'})
-    except UserSocialAuth.DoesNotExist:
+    
+    # Check if GmailAccount exists (this is the source of truth)
+    gmail_account = GmailAccount.objects.filter(user=request.user, uid=uid).first()
+    if not gmail_account:
         return Response({'error': 'Account not found'}, status=404)
+    
+    email_address = gmail_account.email
+    print(f"[DISCONNECT] Disconnecting account {email_address} (uid: {uid}) for user {request.user.username}")
+    
+    # Delete UserSocialAuth if it exists
+    try:
+        social_account = UserSocialAuth.objects.get(user=request.user, provider='google-oauth2', uid=uid)
+        social_account.delete()
+        print(f"[DISCONNECT] Deleted UserSocialAuth for {uid}")
+    except UserSocialAuth.DoesNotExist:
+        # It's okay if UserSocialAuth doesn't exist, we can still disconnect the GmailAccount
+        print(f"[DISCONNECT] No UserSocialAuth found for {uid}")
+    
+    # Delete all emails associated with this account
+    from .models import Email
+    email_count = Email.objects.filter(gmail_account=gmail_account).count()
+    Email.objects.filter(gmail_account=gmail_account).delete()
+    print(f"[DISCONNECT] Deleted {email_count} emails for account {email_address}")
+    
+    # Delete GmailAccount
+    gmail_account.delete()
+    print(f"[DISCONNECT] Deleted GmailAccount for {email_address}")
+    
+    # Verify deletion
+    remaining_accounts = GmailAccount.objects.filter(user=request.user, uid=uid).count()
+    if remaining_accounts > 0:
+        print(f"[DISCONNECT] WARNING: Account {uid} still exists after deletion!")
+    else:
+        print(f"[DISCONNECT] Successfully disconnected account {email_address}")
+    
+    return Response({'message': 'Google account disconnected successfully'})
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def disconnect_all_google_accounts(request):
+    """
+    Disconnects ALL Google accounts for the current user.
+    This is more efficient than disconnecting one by one.
+    """
+    user = request.user
+    print(f"[DISCONNECT ALL] Disconnecting all accounts for user {user.username}")
+    
+    # Get all GmailAccounts for this user
+    gmail_accounts = GmailAccount.objects.filter(user=user)
+    account_count = gmail_accounts.count()
+    
+    if account_count == 0:
+        return Response({'message': 'No accounts to disconnect'}, status=200)
+    
+    # Delete all emails associated with these accounts
+    from .models import Email
+    email_count = Email.objects.filter(gmail_account__user=user).count()
+    Email.objects.filter(gmail_account__user=user).delete()
+    print(f"[DISCONNECT ALL] Deleted {email_count} emails")
+    
+    # Delete all UserSocialAuth entries for this user
+    social_count = UserSocialAuth.objects.filter(user=user, provider='google-oauth2').delete()[0]
+    print(f"[DISCONNECT ALL] Deleted {social_count} UserSocialAuth entries")
+    
+    # Delete all GmailAccounts
+    gmail_count = gmail_accounts.delete()[0]
+    print(f"[DISCONNECT ALL] Deleted {gmail_count} GmailAccounts")
+    
+    # Verify all accounts are deleted
+    remaining_accounts = GmailAccount.objects.filter(user=user).count()
+    remaining_social = UserSocialAuth.objects.filter(user=user, provider='google-oauth2').count()
+    
+    if remaining_accounts > 0 or remaining_social > 0:
+        print(f"[DISCONNECT ALL] WARNING: Some accounts still exist! GmailAccounts: {remaining_accounts}, UserSocialAuth: {remaining_social}")
+        return Response({
+            'message': f'Disconnected {gmail_count} accounts, but some may still exist',
+            'remaining_accounts': remaining_accounts,
+            'remaining_social': remaining_social
+        }, status=207)  # Multi-Status
+    
+    print(f"[DISCONNECT ALL] Successfully disconnected all {gmail_count} accounts for user {user.username}")
+    return Response({
+        'message': f'Successfully disconnected all {gmail_count} account(s)',
+        'accounts_disconnected': gmail_count,
+        'emails_deleted': email_count
+    })
 
 class EmailCategoryViewSet(viewsets.ModelViewSet):
     """
@@ -330,3 +436,65 @@ def recategorize_email(request, message_id):
             "error": error or "Failed to recategorize email",
             "category": category_name
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@csrf_exempt
+@api_view(['POST'])
+def gmail_webhook(request):
+    """
+    Webhook endpoint to receive Gmail Pub/Sub notifications.
+    This endpoint is called by Google Cloud Pub/Sub when new emails arrive.
+    """
+    try:
+        # Parse the Pub/Sub message
+        body = json.loads(request.body)
+        
+        # Pub/Sub sends messages in this format:
+        # {
+        #   "message": {
+        #     "data": "<base64-encoded-json>",
+        #     "messageId": "...",
+        #     "publishTime": "..."
+        #   },
+        #   "subscription": "..."
+        # }
+        
+        if 'message' not in body:
+            print("[WEBHOOK] Invalid message format - no 'message' field")
+            return JsonResponse({'error': 'Invalid message format'}, status=400)
+        
+        message = body['message']
+        if 'data' not in message:
+            print("[WEBHOOK] Invalid message format - no 'data' field")
+            return JsonResponse({'error': 'Invalid message format'}, status=400)
+        
+        # Decode the base64-encoded data
+        try:
+            decoded_data = base64.b64decode(message['data']).decode('utf-8')
+            payload = json.loads(decoded_data)
+        except Exception as e:
+            print(f"[WEBHOOK] Error decoding message data: {e}")
+            return JsonResponse({'error': 'Invalid message data'}, status=400)
+        
+        # Extract email address and history ID from the payload
+        email_address = payload.get('emailAddress')
+        history_id = payload.get('historyId')
+        
+        if not email_address or not history_id:
+            print(f"[WEBHOOK] Missing required fields - emailAddress: {bool(email_address)}, historyId: {bool(history_id)}")
+            return JsonResponse({'error': 'Missing required fields'}, status=400)
+        
+        print(f"[WEBHOOK] Received notification for {email_address} with historyId {history_id}")
+        
+        # Process the Gmail history
+        handle_gmail_history(email_address, history_id)
+        
+        return JsonResponse({'status': 'success'}, status=200)
+        
+    except json.JSONDecodeError as e:
+        print(f"[WEBHOOK] JSON decode error: {e}")
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    except Exception as e:
+        print(f"[WEBHOOK] Error processing webhook: {e}")
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({'error': 'Internal server error'}, status=500)

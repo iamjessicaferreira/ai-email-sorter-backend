@@ -87,38 +87,56 @@ def update_gmail_account_from_social(user):
         try:
             existing_account = GmailAccount.objects.get(user=user, uid=uid)
             refresh_token_to_use = refresh_token or existing_account.refresh_token
+            was_existing = True
         except GmailAccount.DoesNotExist:
-            # Check if account exists with this uid but different user (shouldn't happen, but handle it)
+            # Check if account exists with this uid but different user
+            # DO NOT transfer automatically - this prevents unwanted reconnections
             try:
                 existing_account_other_user = GmailAccount.objects.get(uid=uid)
-                # If account exists for different user, update it to current user
-                existing_account_other_user.user = user
-                existing_account_other_user.save()
-                refresh_token_to_use = refresh_token or existing_account_other_user.refresh_token
-                existing_account = existing_account_other_user
+                print(f"[UPDATE GMAIL ACCOUNT] WARNING: Account with uid {uid} exists for different user {existing_account_other_user.user.username}")
+                print(f"[UPDATE GMAIL ACCOUNT] Skipping this account to prevent unwanted reconnection")
+                continue  # Skip this account - don't create/transfer it
             except GmailAccount.DoesNotExist:
                 existing_account = None
                 refresh_token_to_use = refresh_token or ''
+                was_existing = False
         
-        account, created = GmailAccount.objects.update_or_create(
-            uid=uid,
-            defaults={
-                'user': user,
-                'email': email_address,
-                'access_token': access_token,
-                'refresh_token': refresh_token_to_use,
-                'expires_at': expires_at,
-            }
-        )
+        # Only create/update if account doesn't exist or belongs to current user
+        if was_existing:
+            # Update existing account
+            account = existing_account
+            account.email = email_address
+            account.access_token = access_token
+            if refresh_token:
+                account.refresh_token = refresh_token_to_use
+            account.expires_at = expires_at
+            # DO NOT reset last_history_id if account already exists - preserve it to avoid retroactive emails
+            created = False
+        else:
+            # Create new account
+            account = GmailAccount.objects.create(
+                user=user,
+                uid=uid,
+                email=email_address,
+                access_token=access_token,
+                refresh_token=refresh_token_to_use,
+                expires_at=expires_at,
+                last_history_id=None,  # New account - no history yet
+            )
+            created = True
         
-        # Ensure the account belongs to the current user
-        if account.user != user:
-            account.user = user
-            account.save()
+        account.save()
         
         if refresh_token and not account.refresh_token:
             account.refresh_token = refresh_token
             account.save()
+        
+        # For NEW accounts only, ensure last_history_id is None to avoid fetching retroactive emails
+        # For EXISTING accounts, preserve the last_history_id to avoid processing old emails
+        if created:
+            print(f"[GMAIL ACCOUNT] New account {email_address} - last_history_id is None, will only process new emails from now on")
+        else:
+            print(f"[GMAIL ACCOUNT] Existing account {email_address} - preserving last_history_id ({account.last_history_id}) to avoid retroactive emails")
         
         print(f"[GMAIL ACCOUNT] {'Created' if created else 'Updated'} GmailAccount: {email_address} (uid: {uid}) for user: {user.username}")
 
@@ -133,7 +151,16 @@ def update_gmail_account_from_social(user):
                 body=watch_body
             ).execute()
 
-            account.last_history_id = watch_resp["historyId"]
+            # Only update historyId for NEW accounts (created=True)
+            # For existing accounts, preserve the current last_history_id to avoid retroactive emails
+            if created:
+                # New account - don't save historyId yet, leave as None
+                # The first webhook will set it without processing retroactive emails
+                print(f"[GMAIL ACCOUNT] New account - last_history_id remains None. First webhook will set it without processing retroactive emails.")
+            else:
+                # Existing account - update watch expiration but preserve last_history_id
+                print(f"[GMAIL ACCOUNT] Existing account - preserving last_history_id to avoid retroactive emails")
+            
             account.watch_expires_at = datetime.fromtimestamp(
                 int(watch_resp["expiration"]) // 1000,
                 tz=timezone.utc
@@ -280,6 +307,15 @@ def handle_gmail_history(email_address: str, new_history_id: str):
 
     service = get_gmail_service(account)
     start_id = account.last_history_id
+
+    # If there's no last_history_id, this is a new account connection.
+    # We don't want to fetch retroactive emails, so just update the history_id
+    # and wait for the next webhook to process new emails.
+    if not start_id:
+        print(f"[HISTORY] New account {email_address} - skipping retroactive emails, setting history_id to {new_history_id}")
+        account.last_history_id = new_history_id
+        account.save()
+        return
 
     try:
         history_resp = service.users().history().list(
