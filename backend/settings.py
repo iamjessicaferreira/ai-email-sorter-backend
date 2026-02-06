@@ -140,6 +140,19 @@ SOCIAL_AUTH_GOOGLE_OAUTH2_IGNORE_DEFAULT_SCOPE = True
 
 CSRF_TRUSTED_ORIGINS = config('CSRF_TRUSTED_ORIGINS', cast=Csv())
 
+# Cookie settings for cross-origin authentication (frontend and backend on different domains)
+if DEBUG:
+    SESSION_COOKIE_SAMESITE = 'Lax'
+    SESSION_COOKIE_SECURE = False
+    CSRF_COOKIE_SAMESITE = 'Lax'
+    CSRF_COOKIE_SECURE = False
+else:
+    # Production: SameSite=None required for cross-origin cookies
+    SESSION_COOKIE_SAMESITE = 'None'
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SAMESITE = 'None'
+    CSRF_COOKIE_SECURE = True
+
 # Configurações do banco de dados
 # Suporta DATABASE_URL (Neon Database), variáveis individuais (PostgreSQL tradicional) ou SQLite (desenvolvimento)
 DATABASE_URL = config('DATABASE_URL', default=None)
